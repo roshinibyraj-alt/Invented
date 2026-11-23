@@ -58,7 +58,7 @@ function settlePair(bot, cycle, btcWinner, ethWinner, now) {
   bot.settleMarket(`eth-${cycle.windowStart}`, ethWinner, now + 1);
 }
 
-test('strict ask-sum threshold is below $0.80 and both pairings are independent', () => {
+test('four pairs are independent and each requires a strict ask-sum below $0.80', () => {
   const { bot, getNow } = createBot();
   const btcUp = bot.records.get('BTC:5m').quotes.UP;
   const ethDown = bot.records.get('ETH:5m').quotes.DOWN;
@@ -74,32 +74,44 @@ test('strict ask-sum threshold is below $0.80 and both pairings are independent'
     'a sum exactly equal to $0.80 must not trigger the first pair',
   );
   assert.equal(bot.positions.filter(position => position.pairId === 'eth-up-btc-down').length, 2);
+  assert.equal(bot.positions.filter(position => position.pairId === 'btc-up-eth-up').length, 2);
+  assert.equal(bot.positions.filter(position => position.pairId === 'btc-down-eth-down').length, 0);
 
   btcUp.bestAsk = 0.35;
   btcUp.asks = [{ price: 0.35, size: 2000 }];
   bot.evaluateCrossPairs(getNow());
-  assert.equal(bot.positions.length, 4, 'both cross-pairs should enter independently when both qualify');
-  assert.deepEqual(bot.positions.map(position => position.shares), [100, 100, 100, 100]);
-  assert.equal(bot.crossPairCycles.length, 2);
+  assert.equal(bot.positions.length, 6, 'each qualifying pair should enter independently');
+  assert.deepEqual(bot.positions.map(position => position.shares), [100, 100, 100, 100, 100, 100]);
+  assert.equal(bot.crossPairCycles.length, 3);
   assert.ok(bot.crossPairCycles.every(cycle => cycle.legPositionIds.length === 2));
+  assert.equal(bot.snapshot().crossPairs.length, 4);
   assert.equal(bot.snapshot().strategy.id, CrossPairBot.STRATEGY.id);
 });
 
-test('both losing legs set only that pair to 1,000; at least one win leaves base size', () => {
+test('all pair sizes stay at 100 after wins or losses', () => {
   const { bot, getNow } = createBot();
   bot.evaluateCrossPairs(getNow());
   const btcUpEthDown = bot.crossPairCycles.find(cycle => cycle.pairId === 'btc-up-eth-down');
-  const ethUpBtcDown = bot.crossPairCycles.find(cycle => cycle.pairId === 'eth-up-btc-down');
   assert.ok(btcUpEthDown);
-  assert.ok(ethUpBtcDown);
 
   settlePair(bot, btcUpEthDown, 'DOWN', 'UP', getNow() + 1000);
-  settlePair(bot, ethUpBtcDown, 'DOWN', 'UP', getNow() + 2000);
-
-  assert.equal(bot.crossPairSizing['btc-up-eth-down'].nextShares, 1000);
-  assert.equal(bot.crossPairSizing['eth-up-btc-down'].nextShares, 100);
+  assert.equal(bot.crossPairSizing['btc-up-eth-down'].nextShares, 100);
   assert.equal(btcUpEthDown.sizingOutcome, 'BOTH_LEGS_LOST');
-  assert.equal(ethUpBtcDown.sizingOutcome, 'AT_LEAST_ONE_WIN');
+  assert.ok(Object.values(bot.crossPairSizing).every(item => item.nextShares === 100));
+
+  const nextStart = START + WINDOW_MS;
+  const nextNow = nextStart + 1000;
+  setWindow(bot, nextStart, {
+    btcUp: 0.30,
+    btcDown: 0.40,
+    ethUp: 0.35,
+    ethDown: 0.35,
+  }, nextNow);
+  bot.evaluateCrossPairs(nextNow);
+  const nextCycle = bot.crossPairCycles.find(cycle =>
+    cycle.pairId === 'btc-up-eth-down' && cycle.windowStart === nextStart);
+  assert.ok(nextCycle);
+  assert.equal(nextCycle.sharesPerLeg, 100);
 });
 
 test('a $0.99 best bid closes a leg with a $1.00 per-share payout', () => {
@@ -122,7 +134,7 @@ test('a $0.99 best bid closes a leg with a $1.00 per-share payout', () => {
   assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 100);
 });
 
-test('a fresh empty bid closes at zero and two losing legs advance only that pair', () => {
+test('a fresh empty bid closes at zero without changing the fixed size', () => {
   const { bot, getNow } = createBot();
   bot.evaluateCrossPairs(getNow());
   const cycle = bot.crossPairCycles.find(item => item.pairId === 'btc-up-eth-down');
@@ -141,8 +153,8 @@ test('a fresh empty bid closes at zero and two losing legs advance only that pai
 
   assert.equal(cycle.status, 'CLOSED');
   assert.equal(cycle.sizingOutcome, 'BOTH_LEGS_LOST');
-  assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 1000);
-  assert.equal(bot.crossPairSizing['eth-up-btc-down'].nextShares, 100);
+  assert.equal(bot.crossPairSizing[cycle.pairId].nextShares, 100);
+  assert.ok(Object.values(bot.crossPairSizing).every(item => item.nextShares === 100));
 });
 
 test('a stale empty bid does not trigger the stop-loss', () => {
@@ -177,34 +189,6 @@ test('legs not closed by TP or SL wait for official resolution at window end', (
   assert.equal(cycle.sizingOutcome, 'AT_LEAST_ONE_WIN');
 });
 
-test('a resolved 1,000-share recovery attempt always returns its pair to 100 shares', () => {
-  const { bot, setNow, getNow } = createBot();
-  bot.evaluateCrossPairs(getNow());
-  const firstCycle = bot.crossPairCycles.find(cycle => cycle.pairId === 'btc-up-eth-down');
-  settlePair(bot, firstCycle, 'DOWN', 'UP', getNow() + 1000);
-  assert.equal(bot.crossPairSizing['btc-up-eth-down'].nextShares, 1000);
-
-  const nextStart = START + WINDOW_MS;
-  const nextNow = nextStart + 1000;
-  setNow(nextNow);
-  setWindow(bot, nextStart, {
-    btcUp: 0.30,
-    btcDown: 0.40,
-    ethUp: 0.35,
-    ethDown: 0.35,
-  }, nextNow);
-  bot.evaluateCrossPairs(nextNow);
-
-  const recovery = bot.crossPairCycles.find(cycle =>
-    cycle.pairId === 'btc-up-eth-down' && cycle.windowStart === nextStart);
-  assert.ok(recovery);
-  assert.equal(recovery.sharesPerLeg, 1000);
-  assert.equal(recovery.recoveryAttempt, true);
-  settlePair(bot, recovery, 'UP', 'DOWN', nextNow + 1000);
-  assert.equal(bot.crossPairSizing['btc-up-eth-down'].nextShares, 100);
-  assert.equal(recovery.sizingOutcome, 'RECOVERY_ATTEMPT_RESET');
-});
-
 test('a pair waits for its unresolved previous cycle, without blocking the other pair', () => {
   const { bot, getNow } = createBot();
   bot.evaluateCrossPairs(getNow());
@@ -226,6 +210,8 @@ test('a pair waits for its unresolved previous cycle, without blocking the other
 
   assert.equal(bot.crossPairCycles.filter(item => item.pairId === 'btc-up-eth-down').length, 1);
   assert.equal(bot.crossPairCycles.filter(item => item.pairId === 'eth-up-btc-down').length, 2);
+  assert.equal(bot.crossPairCycles.filter(item => item.pairId === 'btc-up-eth-up').length, 1);
+  assert.equal(bot.crossPairCycles.filter(item => item.pairId === 'btc-down-eth-down').length, 1);
   assert.equal(bot.pairWindowStates['btc-up-eth-down'].status, 'WAITING_FOR_RESOLUTION');
 });
 
@@ -238,11 +224,12 @@ test('the new ledger stores pair sizing and restores open pair positions', () =>
 
   const restored = new CrossPairBot({ now: getNow });
   restored.restoreLedger(saved);
-  assert.equal(restored.crossPairSizing['btc-up-eth-down'].nextShares, 1000);
-  assert.equal(restored.positions.length, 4);
-  assert.equal(restored.crossPairCycles.length, 2);
+  assert.equal(restored.crossPairSizing['btc-up-eth-down'].nextShares, 100);
+  assert.equal(restored.positions.length, 6);
+  assert.equal(restored.crossPairCycles.length, 3);
   assert.equal(restored.snapshot().strategy.id, CrossPairBot.STRATEGY.id);
   const pair = restored.snapshot().crossPairs.find(item => item.id === 'btc-up-eth-down');
   assert.equal(pair.trades[0].legs[0].position.shares, 100);
   assert.equal(pair.trades.length, 1);
+  assert.equal(restored.snapshot().crossPairs.length, 4);
 });

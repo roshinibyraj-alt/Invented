@@ -5,7 +5,6 @@ const config = require('./config');
 
 const BASE_STRATEGY_ID = DipBounceBot._test.STRATEGY.id;
 const BASE_SHARES = config.CROSS_PAIR_BASE_SHARES;
-const RECOVERY_SHARES = config.CROSS_PAIR_BOTH_LOSS_SHARES;
 const ASK_SUM_THRESHOLD = config.CROSS_PAIR_ENTRY_ASK_SUM_MAX;
 const SWEEP_CAP = config.CROSS_PAIR_TAKER_SWEEP_CAP;
 const QUOTE_MAX_AGE_MS = config.DIP_BOUNCE_MAX_QUOTE_AGE_MS;
@@ -35,12 +34,28 @@ const PAIRS = Object.freeze([
       Object.freeze({ asset: 'BTC', side: 'DOWN' }),
     ]),
   }),
+  Object.freeze({
+    id: 'btc-up-eth-up',
+    label: 'BTC UP + ETH UP',
+    legs: Object.freeze([
+      Object.freeze({ asset: 'BTC', side: 'UP' }),
+      Object.freeze({ asset: 'ETH', side: 'UP' }),
+    ]),
+  }),
+  Object.freeze({
+    id: 'btc-down-eth-down',
+    label: 'BTC DOWN + ETH DOWN',
+    legs: Object.freeze([
+      Object.freeze({ asset: 'BTC', side: 'DOWN' }),
+      Object.freeze({ asset: 'ETH', side: 'DOWN' }),
+    ]),
+  }),
 ]);
 
 const STRATEGY = Object.freeze({
-  id: 'btc-eth-cross-pair-ask-sum-paper',
-  name: 'BTC/ETH cross-pair ask-sum paper strategy',
-  version: 'cross-pair-080-tp099-sl000-double-on-both-losses-v2',
+  id: 'btc-eth-four-pair-fixed-100-paper',
+  name: 'BTC/ETH four-pair fixed-size paper strategy',
+  version: 'four-pairs-080-fixed-100-tp099-sl000-v3',
   assets: ['BTC', 'ETH'],
   timeframes: ['5m'],
   sharesPerLeg: BASE_SHARES,
@@ -48,7 +63,7 @@ const STRATEGY = Object.freeze({
   orderType: 'TAKER',
   sweepCap: SWEEP_CAP,
   exit: 'Close a leg at a $0.99 best bid for a $1.00/share payout, or at $0.00 when its fresh book has no bid. Any leg still open at window end waits for official resolution.',
-  sizing: 'Each cross-pair starts at 100 shares per leg. If both legs lose, its next qualifying entry uses 1,000 shares per leg. After that 1,000-share entry closes, reset to 100 whether it wins or loses. Any entry with at least one winning leg stays at 100.',
+  sizing: 'Always 100 shares per leg on every entry in all four cross-pairs. No size progression after wins or losses.',
   execution: 'PAPER ONLY',
 });
 
@@ -61,9 +76,7 @@ function emptySizing() {
     nextShares: BASE_SHARES,
     lastOutcome: null,
     lastUpdatedAt: null,
-    bothLegLosses: 0,
     entries: 0,
-    highSizeResets: 0,
   };
 }
 
@@ -296,7 +309,7 @@ class CrossPairBot extends DipBounceBot {
   }
 
   updateSizingAfterClose() {
-    // Pair sizing is updated only after both legs of a cross-pair resolve.
+    // Pair outcome is recorded only after both legs close; size always remains 100.
   }
 
   evaluateCrossPairs(now = this.now()) {
@@ -328,7 +341,7 @@ class CrossPairBot extends DipBounceBot {
       }
 
       const sizing = this.crossPairSizing[pair.id];
-      const sharesPerLeg = Number(sizing?.nextShares) || BASE_SHARES;
+      const sharesPerLeg = BASE_SHARES;
       pairState.status = 'ENTRY_READY';
       pairState.lastReason =
         `Combined asks $${marketPair.askSum.toFixed(3)} are below $${ASK_SUM_THRESHOLD.toFixed(2)}.`;
@@ -367,7 +380,6 @@ class CrossPairBot extends DipBounceBot {
       entryAt: now,
       entryAskSum: marketPair.askSum,
       sharesPerLeg,
-      recoveryAttempt: sharesPerLeg >= RECOVERY_SHARES,
       legPositionIds: [],
       legs: [],
       sizingApplied: false,
@@ -545,19 +557,9 @@ class CrossPairBot extends DipBounceBot {
       positions.every(position => ['STOP_LOSS', 'RESOLVED_LOSS'].includes(position.status));
     const hasWin = positions.some(position => ['TAKE_PROFIT', 'RESOLVED_WIN'].includes(position.status));
     const sizing = this.crossPairSizing[cycle.pairId] || emptySizing();
-    const wasRecoveryAttempt = cycle.recoveryAttempt || cycle.sharesPerLeg >= RECOVERY_SHARES;
-    if (wasRecoveryAttempt) {
-      sizing.nextShares = BASE_SHARES;
-      sizing.highSizeResets += 1;
-      cycle.sizingOutcome = 'RECOVERY_ATTEMPT_RESET';
-    } else if (bothLost) {
-      sizing.nextShares = RECOVERY_SHARES;
-      sizing.bothLegLosses += 1;
-      cycle.sizingOutcome = 'BOTH_LEGS_LOST';
-    } else {
-      sizing.nextShares = BASE_SHARES;
-      cycle.sizingOutcome = hasWin ? 'AT_LEAST_ONE_WIN' : 'INCOMPLETE_PAIR';
-    }
+    sizing.nextShares = BASE_SHARES;
+    cycle.sizingOutcome = bothLost ? 'BOTH_LEGS_LOST'
+      : hasWin ? 'AT_LEAST_ONE_WIN' : 'INCOMPLETE_PAIR';
     sizing.lastOutcome = cycle.sizingOutcome;
     sizing.lastUpdatedAt = now;
     this.crossPairSizing[cycle.pairId] = sizing;
@@ -580,10 +582,10 @@ class CrossPairBot extends DipBounceBot {
       position.pairRealizedPnl = cycle.realizedPnl;
     }
     const description = cycle.sizingOutcome === 'BOTH_LEGS_LOST'
-      ? `both legs lost; next qualifying entry is ${RECOVERY_SHARES} shares per leg`
-      : cycle.sizingOutcome === 'RECOVERY_ATTEMPT_RESET'
-        ? `the ${RECOVERY_SHARES}-share recovery attempt closed; reset to ${BASE_SHARES} per leg`
-        : `at least one leg won; remain at ${BASE_SHARES} shares per leg`;
+      ? `both legs lost; next qualifying entry remains ${BASE_SHARES} shares per leg`
+      : cycle.sizingOutcome === 'AT_LEAST_ONE_WIN'
+        ? `at least one leg won; next qualifying entry remains ${BASE_SHARES} shares per leg`
+        : `pair cycle closed; next qualifying entry remains ${BASE_SHARES} shares per leg`;
     this.log(`${cycle.pairLabel} closed; ${description}.`, {
       timeframe: '5m',
       outcome: cycle.sizingOutcome === 'BOTH_LEGS_LOST' ? 'bad' : 'good',
@@ -605,7 +607,7 @@ class CrossPairBot extends DipBounceBot {
       return [pair.id, {
         ...emptySizing(),
         ...saved,
-        nextShares: Number(saved.nextShares) === RECOVERY_SHARES ? RECOVERY_SHARES : BASE_SHARES,
+        nextShares: BASE_SHARES,
       }];
     }));
     this.pairWindowStates = Object.fromEntries(PAIRS.map(pair => [
@@ -653,9 +655,14 @@ class CrossPairBot extends DipBounceBot {
       sideStates: Object.fromEntries(['UP', 'DOWN'].map(side => {
         const original = market.sideStates?.[side] || {};
         const other = market.asset === 'BTC' ? 'ETH' : 'BTC';
-        const pair = PAIRS.find(item => item.legs.some(leg =>
+        const paired = PAIRS.filter(item => item.legs.some(leg =>
           leg.asset === market.asset && leg.side === side));
-        const pairState = pair && this.pairWindowStates[pair.id];
+        const pairStates = paired.map(pair => ({
+          pair,
+          state: this.pairWindowStates[pair.id]?.windowStart === market.start
+            ? this.pairWindowStates[pair.id] : null,
+        }));
+        const enteredPairs = pairStates.filter(item => item.state?.entered);
         return [side, {
           bestBid: original.bestBid,
           bestAsk: original.bestAsk,
@@ -663,24 +670,24 @@ class CrossPairBot extends DipBounceBot {
           updatedAt: original.updatedAt,
           ageMs: original.ageMs,
           fresh: original.fresh,
-          orderStatus: pairState?.entered
-            ? pairState.status
+          orderStatus: enteredPairs.length
+            ? enteredPairs.map(item => item.state.status).join(' · ')
             : 'MONITORING',
-          requestedShares: pairState?.entered
-            ? (this.crossPairSizing[pair.id]?.nextShares || BASE_SHARES) : null,
+          requestedShares: enteredPairs.length ? BASE_SHARES * enteredPairs.length : null,
           filledShares: this.positions
-            .filter(position => position.pairId === pair?.id &&
+            .filter(position => paired.some(pair => pair.id === position.pairId) &&
               position.windowStart === market.start && position.asset === market.asset &&
               position.side === side)
             .reduce((sum, position) => sum + Number(position.shares || 0), 0),
-          pairLabel: pair?.label || `${market.asset} ${side} · ${other}`,
-          reason: pairState?.lastReason || 'Monitored as one leg of its BTC/ETH cross-pair.',
+          pairLabel: paired.map(pair => pair.label).join(' / ') || `${market.asset} ${side} · ${other}`,
+          reason: pairStates.map(item => item.state?.lastReason).filter(Boolean).join(' · ')
+            || 'Monitored as a leg of each applicable BTC/ETH cross-pair.',
         }];
       })),
     }));
     state.strategy = {
       ...STRATEGY,
-      entry: 'Monitor BTC UP + ETH DOWN and ETH UP + BTC DOWN independently. Enter a pair when its fresh best asks sum to strictly less than $0.80; one entry per pair per 5-minute window.',
+      entry: 'Monitor all four BTC/ETH UP/DOWN combinations independently. Enter a pair when its fresh best asks sum to strictly less than $0.80; one entry per pair per 5-minute window.',
       fill: 'Paper taker sweep of visible asks up to $0.99. Actual filled quantity, average entry, and market taker fees are recorded; unfilled remainder is cancelled.',
       sizing: STRATEGY.sizing,
       settlement: 'Each leg closes independently at the $0.99 take-profit or on a fresh empty bid at $0.00. Any still-open leg is sent to official resolution at window end; sizing updates after both pair legs close.',
@@ -809,7 +816,6 @@ CrossPairBot.PAIRS = PAIRS;
 CrossPairBot.STRATEGY = STRATEGY;
 CrossPairBot.constants = {
   BASE_SHARES,
-  RECOVERY_SHARES,
   ASK_SUM_THRESHOLD,
   SWEEP_CAP,
   QUOTE_MAX_AGE_MS,

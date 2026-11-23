@@ -52,13 +52,12 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented/);
-  assert.match(html, /Two independent cross-pair entries/);
-  assert.match(html, /BTC UP \+ ETH DOWN and ETH UP \+ BTC DOWN/);
+  assert.match(html, /Four independent cross-pair entries/);
+  assert.match(html, /BTC UP \+ ETH DOWN, ETH UP \+ BTC DOWN, BTC UP \+ ETH UP, and BTC DOWN \+ ETH DOWN/);
   assert.match(html, /Cross-pair ask-sum entry/);
   assert.match(html, /below \$0\.80/);
-  assert.match(html, /Buy the pair size on both legs/);
-  assert.match(html, /Increase only after both legs lose/);
-  assert.match(html, /1,000 shares per leg/);
+  assert.match(html, /Always buy 100 shares on each leg/);
+  assert.match(html, /regardless of previous wins or losses/);
   assert.match(html, /History is saved in persistent Railway storage/);
   assert.match(html, /Paper taker sweeps are capped at \$0\.99/);
   assert.match(html, /Use the \$0\.99 take-profit and empty-bid stop/);

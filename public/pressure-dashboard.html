@@ -162,6 +162,8 @@
     .pair-card { min-width:0; overflow:hidden; border:1px solid var(--line); border-radius:18px; background:var(--paper); box-shadow:var(--shadow); }
     .pair-card[data-pair="btc-up-eth-down"] { border-top:4px solid #e2b632; }
     .pair-card[data-pair="eth-up-btc-down"] { border-top:4px solid #7887dd; }
+    .pair-card[data-pair="btc-up-eth-up"] { border-top:4px solid #42a878; }
+    .pair-card[data-pair="btc-down-eth-down"] { border-top:4px solid #e47a68; }
     .pair-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; padding:13px 13px 10px; border-bottom:1px solid #edf0e9; }
     .pair-head h3 { margin:0; font-size:14px; letter-spacing:-.03em; }
     .pair-head small { display:block; margin-top:3px; color:var(--muted); font-size:9px; }
@@ -293,9 +295,9 @@
 
     <section class="hero" aria-labelledby="pageTitle">
       <div class="hero-copy">
-        <div class="eyebrow">Two independent cross-pair entries</div>
+        <div class="eyebrow">Four independent cross-pair entries</div>
         <h1 id="pageTitle">The market pulse, at a glance.</h1>
-        <p>BTC UP + ETH DOWN and ETH UP + BTC DOWN · 5-minute paper markets · independent sizing for each pair.</p>
+        <p>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN · each pair uses a fixed 100 shares per leg.</p>
       </div>
       <div class="hero-side">
         <div class="hero-stat"><span>Markets live</span><strong id="marketLiveCount">— / 2</strong></div>
@@ -317,6 +319,8 @@
       <div class="pair-grid" id="sizingGrid" aria-label="Cross-pair trades and sizing">
         <div class="loading-card" aria-label="Loading BTC UP plus ETH DOWN"></div>
         <div class="loading-card" aria-label="Loading ETH UP plus BTC DOWN"></div>
+        <div class="loading-card" aria-label="Loading BTC UP plus ETH UP"></div>
+        <div class="loading-card" aria-label="Loading BTC DOWN plus ETH DOWN"></div>
       </div>
       <p class="persistence-note" id="ledgerPersistence" aria-live="polite">Paper history storage status: checking</p>
       <div class="split">
@@ -381,12 +385,11 @@
       </div>
       <div>
         <div class="strategy-steps">
-          <div class="strategy-step"><span class="step-num">1</span><div><strong>Evaluate both combinations independently</strong><span>BTC UP + ETH DOWN and ETH UP + BTC DOWN can each trigger in the same 5-minute window.</span></div></div>
+          <div class="strategy-step"><span class="step-num">1</span><div><strong>Evaluate all four combinations independently</strong><span>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN can each trigger in the same 5-minute window.</span></div></div>
           <div class="strategy-step"><span class="step-num">2</span><div><strong>Enter when combined best asks are below $0.80</strong><span>Each pair has one entry per window. Both current best asks must be fresh, and their sum must be strictly below $0.80.</span></div></div>
-          <div class="strategy-step"><span class="step-num">3</span><div><strong>Buy the pair size on both legs</strong><span>Start at 100 shares per leg. After both legs lose, the next qualifying entry uses 1,000 shares per leg. Paper taker sweeps are capped at $0.99.</span></div></div>
+          <div class="strategy-step"><span class="step-num">3</span><div><strong>Always buy 100 shares on each leg</strong><span>Every qualifying entry stays flat at 100 requested shares per leg, regardless of previous wins or losses. Paper taker sweeps are capped at $0.99.</span></div></div>
           <div class="strategy-step"><span class="step-num">4</span><div><strong>Use the $0.99 take-profit and empty-bid stop</strong><span>A fresh best bid at $0.99 credits $1.00 per share. A fresh book with no bid closes that leg at $0.00.</span></div></div>
           <div class="strategy-step"><span class="step-num">5</span><div><strong>Send remaining open legs to resolution</strong><span>If neither exit happens before the 5-minute window ends, the remaining position waits for official resolution.</span></div></div>
-          <div class="strategy-step"><span class="step-num">6</span><div><strong>Increase only after both legs lose</strong><span>If both legs lose, that pair’s next entry is 1,000 shares per leg. If at least one leg wins, keep 100. After a 1,000-share entry closes, return to 100.</span></div></div>
         </div>
         <div class="strategy-meta">
           <span class="meta-pill">Taker entry fees included</span>
@@ -558,12 +561,9 @@
       }
 
       function renderPairCards(pairs) {
-        const byId = new Map((Array.isArray(pairs) ? pairs : []).map(pair => [pair.id, pair]));
-        $('sizingGrid').innerHTML = [
-          ['btc-up-eth-down', 'BTC UP + ETH DOWN'],
-          ['eth-up-btc-down', 'ETH UP + BTC DOWN'],
-        ].map(([id, fallbackLabel]) => {
-          const pair = byId.get(id) || {};
+        const list = Array.isArray(pairs) ? pairs : [];
+        $('sizingGrid').innerHTML = list.length ? list.map(pair => {
+          const id = pair.id;
           const nextShares = hasNumber(pair.nextSharesPerLeg) ? Number(pair.nextSharesPerLeg) : 100;
           const status = String(pair.status || 'WAITING_FOR_QUOTES').replaceAll('_', ' ');
           const outcome = String(pair.lastOutcome || '').replaceAll('_', ' ');
@@ -578,7 +578,7 @@
           const seconds = hasNumber(pair.secondsRemaining) ? `${Math.ceil(pair.secondsRemaining)}s left` : 'Window waiting';
           return `<article class="pair-card" data-pair="${safe(id)}">
             <div class="pair-head">
-              <div><h3>${safe(label(pair.label, fallbackLabel))}</h3><small>${safe(seconds)} · ${pair.fresh ? 'fresh books' : 'waiting for fresh books'}</small></div>
+              <div><h3>${safe(label(pair.label))}</h3><small>${safe(seconds)} · ${pair.fresh ? 'fresh books' : 'waiting for fresh books'}</small></div>
               <span class="pair-state ${stateClass}">${safe(status)}</span>
             </div>
             <div class="pair-body">
@@ -592,7 +592,7 @@
               ${history.length ? `<details class="trade-history"><summary>Recent trades · ${trades.length - (current ? 1 : 0)} older entries</summary><div class="trade-history-list">${history.map(trade => tradeCardHtml(trade, true)).join('')}</div></details>` : ''}
             </div>
           </article>`;
-        }).join('');
+        }).join('') : '<div class="empty">Waiting for the four cross-pair markets.</div>';
       }
 
       function renderLedgerPersistence(persistence) {
