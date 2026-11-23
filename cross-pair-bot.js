@@ -59,13 +59,21 @@ const PAIRS = Object.freeze([
     ]),
   }),
 ]);
+const ACTIVE_ENTRY_PAIR_IDS = new Set([
+  'btc-up-eth-down',
+  'eth-up-btc-down',
+]);
+const ACTIVE_ENTRY_PAIRS = Object.freeze(PAIRS.filter(pair =>
+  ACTIVE_ENTRY_PAIR_IDS.has(pair.id)));
+const CLOSED_PAIR_LOG_PAGE_SIZE = 20;
 
 const STRATEGY = Object.freeze({
   id: 'btc-eth-four-pair-inverse-exit-tpsl-paper',
-  name: 'BTC/ETH four-pair fixed-size paper strategy',
-  version: 'four-pairs-080-inverse-122-tp-099-empty-book-sl-000-v6-quote-audited',
+  name: 'BTC/ETH mixed-pair fixed-size paper strategy',
+  version: 'mixed-pairs-080-inverse-122-tp-099-empty-book-sl-000-v7-quote-audited',
   assets: ['BTC', 'ETH'],
   timeframes: ['5m'],
+  activeEntryPairIds: [...ACTIVE_ENTRY_PAIR_IDS],
   sharesPerLeg: BASE_SHARES,
   entryAskSumBelow: ASK_SUM_THRESHOLD,
   orderType: 'TAKER',
@@ -80,7 +88,7 @@ const STRATEGY = Object.freeze({
   takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
   stopLoss: 'Fresh empty best-bid book; settle remaining shares at $0.',
   exit: 'Sell a pair when its own combined asks reach $1.22. The inverse pair enters only if its own asks are below $0.80. Also apply the $0.99 bid take-profit ($1/share) and empty-bid $0 stop; any remaining open shares go to official resolution at window end.',
-  sizing: 'Always 100 shares per leg on every entry in all four cross-pairs. No size progression after wins or losses.',
+  sizing: 'Always 100 shares per leg on entries in the two mixed-direction cross-pairs. No size progression after wins or losses.',
   execution: 'PAPER ONLY',
 });
 
@@ -456,7 +464,7 @@ class CrossPairBot extends DipBounceBot {
 
   evaluateCrossPairs(now = this.now()) {
     let changed = this.processInversePairExits(now);
-    for (const pair of PAIRS) {
+    for (const pair of ACTIVE_ENTRY_PAIRS) {
       const marketPair = this.pairQuotes(pair, now);
       if (!marketPair.marketsAligned || marketPair.windowStart == null) continue;
       if (now < marketPair.windowStart || now >= marketPair.windowEnd) continue;
@@ -1165,6 +1173,69 @@ class CrossPairBot extends DipBounceBot {
     };
   }
 
+  closedPairLogMeta() {
+    const positionsById = new Map(this.positions.map(position => [position.id, position]));
+    const closedCycles = this.crossPairCycles.filter(cycle => {
+      const positions = (cycle.legPositionIds || [])
+        .map(id => positionsById.get(id))
+        .filter(Boolean);
+      return positions.length > 0 && positions.every(position =>
+        CLOSED_POSITION_STATUSES.has(position.status));
+    });
+    return {
+      total: closedCycles.length,
+      latestClosedAt: closedCycles.reduce((latest, cycle) =>
+        Math.max(latest, Number(cycle.closedAt) || 0), 0) || null,
+    };
+  }
+
+  closedPairLogPage(limit = CLOSED_PAIR_LOG_PAGE_SIZE, offset = 0) {
+    const positionsById = new Map(this.positions.map(position => [position.id, position]));
+    const ordersById = new Map(this.orders.map(order => [order.id, order]));
+    const closedCycles = this.crossPairCycles.filter(cycle => {
+      const positions = (cycle.legPositionIds || [])
+        .map(id => positionsById.get(id))
+        .filter(Boolean);
+      return positions.length > 0 && positions.every(position =>
+        CLOSED_POSITION_STATUSES.has(position.status));
+    }).sort((a, b) =>
+      (Number(b.closedAt) || Number(b.entryAt) || 0) -
+      (Number(a.closedAt) || Number(a.entryAt) || 0));
+    const page = closedCycles.slice(offset, offset + limit).map(cycle => ({
+      ...cycle,
+      status: 'CLOSED',
+      legs: (cycle.legs || []).map(leg => {
+        const position = positionsById.get(leg.positionId);
+        const order = ordersById.get(leg.orderId);
+        return {
+          ...leg,
+          order: order ? {
+            status: order.status,
+            requestedShares: order.requestedShares,
+            filledShares: order.filledShares,
+            averagePrice: order.averagePrice,
+            cost: order.cost,
+            fee: order.fee,
+            createdAt: order.createdAt,
+            executionAudit: order.executionAudit || null,
+          } : null,
+          position: position ? { ...position } : null,
+        };
+      }),
+    }));
+    const nextOffset = offset + page.length;
+    return {
+      records: page,
+      total: closedCycles.length,
+      offset,
+      limit,
+      nextOffset,
+      hasMore: nextOffset < closedCycles.length,
+      latestClosedAt: closedCycles.reduce((latest, cycle) =>
+        Math.max(latest, Number(cycle.closedAt) || 0), 0) || null,
+    };
+  }
+
   snapshot() {
     const state = super.snapshot();
     const now = this.now();
@@ -1176,8 +1247,12 @@ class CrossPairBot extends DipBounceBot {
         const record = this.records.get(`${market.asset}:5m`);
         const quote = record?.quotes?.[side] || null;
         const other = market.asset === 'BTC' ? 'ETH' : 'BTC';
-        const paired = PAIRS.filter(item => item.legs.some(leg =>
-          leg.asset === market.asset && leg.side === side));
+        const paired = PAIRS.filter(item =>
+          (ACTIVE_ENTRY_PAIR_IDS.has(item.id) ||
+            this.hasUnresolvedCycle(item.id) ||
+            (this.pairWindowStates[item.id]?.windowStart === market.start &&
+              this.pairWindowStates[item.id]?.entered)) &&
+          item.legs.some(leg => leg.asset === market.asset && leg.side === side));
         const pairStates = paired.map(pair => ({
           pair,
           state: this.pairWindowStates[pair.id]?.windowStart === market.start
@@ -1208,7 +1283,7 @@ class CrossPairBot extends DipBounceBot {
     }));
     state.strategy = {
       ...STRATEGY,
-      entry: 'Monitor all four BTC/ETH UP/DOWN combinations independently. Enter a pair when its fresh best asks sum to strictly less than $0.80; one entry per pair per 5-minute window.',
+      entry: 'Only BTC UP + ETH DOWN and ETH UP + BTC DOWN can take new entries. Enter when that pair’s fresh best asks sum to strictly less than $0.80; one entry per pair per 5-minute window.',
       fill: 'Paper taker sweep of fresh visible asks up to $0.99. The same displayed ask liquidity cannot be reused by another simulated entry until a new book update arrives; actual filled quantity, average entry, and fees are recorded.',
       quoteIntegrity: `Reject out-of-order or pre-window book updates. Entries require matching current token/market IDs, quotes no older than ${QUOTE_MAX_AGE_MS} ms, and pair-leg quote timestamps within ${QUOTE_SKEW_MAX_MS} ms.`,
       executionAudit: 'Each simulated entry stores the exact source book snapshot, quote timestamps, available ask depth, simulated fills, fees, and VWAP for later review.',
@@ -1231,6 +1306,7 @@ class CrossPairBot extends DipBounceBot {
       return [pair.id, current ? { ...current } : null];
     }));
     state.crossPairCycles = this.crossPairCycles.map(cycle => ({ ...cycle }));
+    state.closedPairLogMeta = this.closedPairLogMeta();
     state.executionAudit = {
       model: EXECUTION_MODEL,
       maximumQuoteAgeMs: QUOTE_MAX_AGE_MS,
@@ -1239,8 +1315,16 @@ class CrossPairBot extends DipBounceBot {
       legacyUnauditedOrderCount: this.orders.filter(order =>
         order.action === 'BUY_TAKER' && !order.executionAudit).length,
     };
-    state.crossPairs = PAIRS.map(pair => {
+    const currentStart = this.records.get('BTC:5m')?.market?.start;
+    const visiblePairs = PAIRS.filter(pair => {
+      const currentWindow = currentStart == null ? null : this.pairWindowState(pair, currentStart);
+      return ACTIVE_ENTRY_PAIR_IDS.has(pair.id) ||
+        this.hasUnresolvedCycle(pair.id) ||
+        Boolean(currentWindow?.entered);
+    });
+    state.crossPairs = visiblePairs.map(pair => {
       const inversePair = PAIRS.find(item => item.id === pair.inversePairId);
+      const entryEnabled = ACTIVE_ENTRY_PAIR_IDS.has(pair.id);
       const marketPair = this.pairQuotes(pair, now);
       const windowState = marketPair.windowStart == null
         ? this.pairWindowStates[pair.id] || emptyWindowState(pair, null)
@@ -1261,12 +1345,22 @@ class CrossPairBot extends DipBounceBot {
           : currentCycleClosed ? 'CLOSED'
             : currentCycleState?.reverseExitStatus === 'SELLING_REMAINDER' ? 'REVERSAL_EXITING'
               : 'ENTERED';
+        if (!entryEnabled && ['ENTERED', 'REVERSAL_EXITING'].includes(status)) {
+          status = 'MANAGING_EXISTING_POSITION';
+        }
         reason = currentCyclePending
           ? 'One or more legs are waiting for official resolution.'
-          : currentCycleClosed ? 'All filled legs in this pair have closed.'
+          : currentCycleClosed ? entryEnabled
+            ? 'All filled legs in this pair have closed.'
+            : 'New entries are disabled; the existing pair trade has closed.'
             : currentCycleState?.reverseExitStatus === 'SELLING_REMAINDER'
               ? `Inverse exit is active; selling remaining shares. ${inversePair?.label || 'The inverse pair'} still needs its own ask sum below $0.80 to enter.`
-              : reason;
+              : entryEnabled ? reason : 'New entries are disabled; managing the existing position through its normal exits.';
+      } else if (!entryEnabled) {
+        status = unresolved ? 'WAITING_FOR_RESOLUTION' : 'ENTRY_DISABLED';
+        reason = unresolved
+          ? 'New entries are disabled; managing the previous pair trade until resolution.'
+          : 'New entries are disabled for this same-direction pair.';
       } else if (unresolved) {
         status = 'WAITING_FOR_RESOLUTION';
         reason = 'Waiting for the previous entry in this pair to fully resolve before sizing the next one.';
@@ -1336,6 +1430,7 @@ class CrossPairBot extends DipBounceBot {
       return {
         id: pair.id,
         label: pair.label,
+        entryEnabled,
         inversePairId: pair.inversePairId,
         inversePairLabel: inversePair?.label || null,
         legs,

@@ -1,8 +1,8 @@
 {
-  "name": "invented-btc-eth-5m-four-pair-paper-bot",
+  "name": "invented-btc-eth-5m-mixed-pair-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only BTC/ETH 5-minute four-pair strategy with fixed 100-share legs.",
+  "description": "Paper-only BTC/ETH 5-minute mixed-direction pair strategy with fixed 100-share legs.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

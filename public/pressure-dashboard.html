@@ -211,6 +211,11 @@
     .trade-history summary { color:var(--muted); font-size:9px; font-weight:850; cursor:pointer; }
     .trade-history-list { display:grid; gap:7px; margin-top:8px; }
     .trade-history { display:grid; gap:7px; }
+    .closed-trade-list { display:grid; gap:8px; max-height:760px; overflow:auto; overscroll-behavior:contain; }
+    .closed-log-note { margin:0 0 9px; color:var(--muted); font-size:9px; }
+    .load-more-closed { display:block; width:100%; margin-top:10px; padding:11px 12px; border:1px solid #dce2d8; border-radius:10px; background:#f5f7f1; color:var(--ink); font:inherit; font-size:10px; font-weight:900; cursor:pointer; }
+    .load-more-closed:disabled { opacity:.6; cursor:wait; }
+    .closed-log-error { margin:8px 0 0; color:#a94739; font-size:9px; }
     .fill-audit { margin-top:7px; padding-top:6px; border-top:1px dashed #dfe5d9; }
     .fill-audit summary { color:#58665c; font-size:8px; font-weight:850; cursor:pointer; }
     .fill-audit-content { display:grid; gap:4px; margin-top:6px; color:var(--muted); font-size:8px; overflow-wrap:anywhere; }
@@ -315,7 +320,7 @@
       <div class="hero-copy">
         <div class="eyebrow">BTC + ETH · 5-minute paper bot</div>
         <h1 id="pageTitle">Live pairs and results</h1>
-        <p>Four cross-pairs are monitored independently. Each entry requests 100 shares on each leg.</p>
+        <p>Only the two mixed-direction pairs take new entries. Each entry requests 100 shares on each leg.</p>
       </div>
       <div class="hero-side">
         <div class="hero-stat"><span>Markets live</span><strong id="marketLiveCount">— / 2</strong></div>
@@ -350,16 +355,27 @@
     </div>
     <section class="section" aria-labelledby="positionsHeading">
       <div class="section-head">
-        <div><div class="section-kicker">Live status · 100 shares per leg</div><h2 id="positionsHeading">Four cross-pairs</h2></div>
+        <div><div class="section-kicker">Live status · 100 shares per leg</div><h2 id="positionsHeading">Mixed-direction pairs</h2></div>
         <div class="section-note">Current ask sum and position P&amp;L</div>
       </div>
       <div class="pair-grid" id="sizingGrid" aria-label="Cross-pair trades and sizing">
         <div class="loading-card" aria-label="Loading BTC UP plus ETH DOWN"></div>
         <div class="loading-card" aria-label="Loading ETH UP plus BTC DOWN"></div>
-        <div class="loading-card" aria-label="Loading BTC UP plus ETH UP"></div>
-        <div class="loading-card" aria-label="Loading BTC DOWN plus ETH DOWN"></div>
       </div>
       <p class="persistence-note" id="ledgerPersistence" aria-live="polite">Paper history storage status: checking</p>
+    </section>
+
+    <section class="section" aria-label="Closed pair trade history">
+      <div class="section-head">
+        <div><div class="section-kicker">Completed trades · all pair types</div><h2>Closed pair log</h2></div>
+        <span class="count-chip" id="closedTradeCount">Loading history</span>
+      </div>
+      <p class="closed-log-note">Entry and exit prices, filled shares, fees, exit reason, and realized P&amp;L. Older trades load on request.</p>
+      <div class="closed-trade-list" id="closedTradeList" aria-live="polite">
+        <div class="empty">Loading closed pair trades…</div>
+      </div>
+      <button class="load-more-closed" id="loadMoreClosedTrades" type="button" hidden>Load older pair trades</button>
+      <p class="closed-log-error" id="closedTradeError" role="status"></p>
     </section>
 
     <details class="advanced-panel">
@@ -406,15 +422,15 @@
 
     <section class="section strategy-card" aria-labelledby="strategyHeading">
       <div class="strategy-title">
-        <div><div class="eyebrow">Strategy rules</div><h3 id="strategyHeading">Inverse-pair exits + ask-sum entries</h3></div>
+        <div><div class="eyebrow">Strategy rules</div><h3 id="strategyHeading">Two mixed pairs + ask-sum entries</h3></div>
         <span class="paper-stamp">PAPER SIMULATION</span>
       </div>
       <div>
         <div class="strategy-steps">
-          <div class="strategy-step"><span class="step-num">1</span><div><strong>Evaluate all four combinations independently</strong><span>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN can each trigger in the same 5-minute window.</span></div></div>
+          <div class="strategy-step"><span class="step-num">1</span><div><strong>Only two mixed-direction pairs take new entries</strong><span>BTC UP + ETH DOWN and ETH UP + BTC DOWN remain enabled. Same-direction pairs are disabled for new entries; any already-open positions continue through their normal exits.</span></div></div>
           <div class="strategy-step"><span class="step-num">2</span><div><strong>Enter when combined best asks are below $0.80</strong><span>Each pair has one entry per window. Both current best asks must be fresh, and their sum must be strictly below $0.80.</span></div></div>
           <div class="strategy-step"><span class="step-num">3</span><div><strong>Always buy 100 shares on each leg</strong><span>Every qualifying entry stays flat at 100 requested shares per leg, regardless of previous wins or losses. Paper taker sweeps are capped at $0.99.</span></div></div>
-          <div class="strategy-step"><span class="step-num">4</span><div><strong>Exit one pair without forcing its inverse to sell</strong><span>If this pair’s own combined asks reach $1.22, sell its remaining shares against visible bids. Its inverse enters only when its own fresh asks are below $0.80.</span></div></div>
+          <div class="strategy-step"><span class="step-num">4</span><div><strong>Exit one pair without forcing its inverse to sell</strong><span>If this pair’s own combined asks reach $1.22, sell its remaining shares against visible bids. The other enabled mixed pair remains independent and enters only when its own fresh asks are below $0.80.</span></div></div>
           <div class="strategy-step"><span class="step-num">5</span><div><strong>Keep the previous take-profit, stop, and resolution rules</strong><span>At a $0.99 best bid, count $1 per remaining share. An empty fresh bid book counts as a $0 stop. Any shares still open at window end go to official resolution.</span></div></div>
         </div>
         <div class="strategy-meta">
@@ -479,6 +495,10 @@
       const label = (value, fallback = '—') => value === null || value === undefined || value === '' ? fallback : String(value);
       let latestState = null;
       let requesting = false;
+      let closedLogRecords = [];
+      let closedLogMeta = { total: 0, hasMore: false };
+      let closedLogRevision = '';
+      let closedLogRequest = false;
 
       function sideHtml(side, data) {
         const item = data || {};
@@ -651,7 +671,7 @@
             : recent ? 'Past entry' : 'This window’s entry';
         return `<article class="trade-card ${recent ? 'recent' : ''}">
           <div class="trade-head">
-            <div><strong>${heading} · ${safe(dateTime(cycle.entryAt || cycle.windowStart))}</strong>
+            <div><strong>${heading}${cycle.pairLabel ? ` · ${safe(cycle.pairLabel)}` : ''} · ${safe(dateTime(cycle.entryAt || cycle.windowStart))}</strong>
               <small>Combined asks ${money(cycle.entryAskSum, 3)} · ${shares(cycle.sharesPerLeg)} shares requested per leg</small></div>
             <span class="trade-status ${statusClass}">${safe(status)}</span>
           </div>
@@ -670,20 +690,20 @@
             pair.lastOutcome ? 'win' : '';
           const stateClass = pair.status === 'CLOSED'
             ? pair.currentCycle?.sizingOutcome === 'PAIR_LOSS' ? 'loss' : 'active'
-            : ['ENTERED', 'ENTRY_READY', 'PENDING_RESOLUTION', 'REVERSAL_EXITING'].includes(pair.status) ? 'active' : '';
+            : ['ENTERED', 'ENTRY_READY', 'PENDING_RESOLUTION', 'REVERSAL_EXITING', 'MANAGING_EXISTING_POSITION'].includes(pair.status) ? 'active' : '';
           const current = pair.currentCycle;
           const trades = Array.isArray(pair.trades) ? pair.trades : [];
           const history = trades.filter(trade => trade.id !== current?.id).slice(0, 6);
           const seconds = hasNumber(pair.secondsRemaining) ? `${Math.ceil(pair.secondsRemaining)}s left` : 'Window waiting';
-          return `<article class="pair-card" data-pair="${safe(id)}">
+          return `<article class="pair-card ${pair.entryEnabled === false ? 'paused' : ''}" data-pair="${safe(id)}">
             <div class="pair-head">
-              <div><h3>${safe(label(pair.label))}</h3><small>Inverse: ${safe(label(pair.inversePairLabel, '—'))} · ${safe(seconds)}</small></div>
+              <div><h3>${safe(label(pair.label))}</h3><small>${pair.entryEnabled === false ? 'New entries paused · ' : ''}Inverse: ${safe(label(pair.inversePairLabel, '—'))} · ${safe(seconds)}</small></div>
               <span class="pair-state ${stateClass}">${safe(status)}</span>
             </div>
             <div class="pair-body">
               <div class="pair-summary">
                 <div><span>Current ask sum</span><strong>${money(pair.combinedAsk, 3)}</strong></div>
-                <div><span>Entry rule</span><strong>Below $0.800</strong></div>
+                <div><span>Entry rule</span><strong>${pair.entryEnabled === false ? 'Paused' : 'Below $0.800'}</strong></div>
               </div>
               <div class="pair-leg-quotes">
                 ${(pair.legs || []).map(leg => `<span class="${leg.fresh ? 'fresh' : 'stale'}">
@@ -697,7 +717,55 @@
               ${history.length ? `<details class="trade-history"><summary>Recent trades · ${trades.length - (current ? 1 : 0)} older entries</summary><div class="trade-history-list">${history.map(trade => tradeCardHtml(trade, true, pair.windowStart)).join('')}</div></details>` : ''}
             </div>
           </article>`;
-        }).join('') : '<div class="empty">Waiting for the four cross-pair markets.</div>';
+        }).join('') : '<div class="empty">Waiting for the two mixed-direction pair markets.</div>';
+      }
+
+      function renderClosedPairLogs() {
+        const marketStart = latestState?.markets?.find(market =>
+          String(market.asset).toUpperCase() === 'BTC')?.start ?? null;
+        $('closedTradeCount').textContent =
+          `${closedLogMeta.total || 0} closed ${Number(closedLogMeta.total) === 1 ? 'pair' : 'pairs'}`;
+        $('closedTradeList').innerHTML = closedLogRecords.length
+          ? closedLogRecords.map(cycle => tradeCardHtml(cycle, true, marketStart)).join('')
+          : '<div class="empty">No closed pair trades yet.</div>';
+        $('loadMoreClosedTrades').hidden = !closedLogMeta.hasMore;
+        $('loadMoreClosedTrades').disabled = closedLogRequest;
+        $('loadMoreClosedTrades').textContent = closedLogRequest
+          ? 'Loading trades…' : 'Load older pair trades';
+      }
+
+      async function loadClosedPairLogs({ append = false, refresh = false } = {}) {
+        if (closedLogRequest) return;
+        closedLogRequest = true;
+        $('closedTradeError').textContent = '';
+        renderClosedPairLogs();
+        const offset = append && !refresh ? closedLogRecords.length : 0;
+        try {
+          const response = await fetch(
+            `/api/closed-pair-logs?limit=20&offset=${offset}&ts=${Date.now()}`,
+            { cache: 'no-store' },
+          );
+          if (!response.ok) throw new Error(`Closed trade history request failed (${response.status})`);
+          const page = await response.json();
+          if (!Array.isArray(page.records)) throw new Error('Closed trade history response is invalid');
+          if (refresh || append) {
+            const byId = new Map([...closedLogRecords, ...page.records].map(record => [record.id, record]));
+            closedLogRecords = [...byId.values()].sort((a, b) =>
+              (Number(b.closedAt) || Number(b.entryAt) || 0) -
+              (Number(a.closedAt) || Number(a.entryAt) || 0));
+          } else {
+            closedLogRecords = page.records;
+          }
+          closedLogMeta = page;
+          closedLogRevision = `${page.total}:${page.latestClosedAt || ''}`;
+        } catch (error) {
+          closedLogRevision = '';
+          $('closedTradeError').textContent =
+            error instanceof Error ? error.message : 'Could not load closed pair trades.';
+        } finally {
+          closedLogRequest = false;
+          renderClosedPairLogs();
+        }
       }
 
       function renderLedgerPersistence(persistence) {
@@ -864,6 +932,15 @@
         renderOrders(latestState.orders);
         renderEvents(latestState.events);
         drawEquity(account.equityCurve);
+        const closedMeta = latestState.closedPairLogMeta;
+        if (closedMeta) {
+          const revision = `${closedMeta.total || 0}:${closedMeta.latestClosedAt || ''}`;
+          if (revision !== closedLogRevision && !closedLogRequest) {
+            void loadClosedPairLogs({ append: closedLogRecords.length > 0, refresh: closedLogRecords.length > 0 });
+          } else if (!closedLogRecords.length && !closedLogRequest) {
+            void loadClosedPairLogs();
+          }
+        }
         $('errorBanner').classList.remove('visible');
       }
 
@@ -890,6 +967,7 @@
       }
 
       $('retryButton').addEventListener('click', refresh);
+      $('loadMoreClosedTrades').addEventListener('click', () => loadClosedPairLogs({ append: true }));
       refresh();
       setInterval(refresh, 1000);
     })();
