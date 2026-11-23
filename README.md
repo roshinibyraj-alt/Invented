@@ -21,7 +21,7 @@ Wins and losses do not change sizing. Each enabled pair can have one entry per w
 
 ## Data and dashboard
 
-Market metadata and official outcomes come from Polymarket Gamma. The live order books use a Polymarket CLOB WebSocket subscription for the active BTC and ETH token IDs. The mobile-first dashboard puts balance and performance at the top, followed by the two enabled mixed-pair cards and any disabled pair still managing an older open position. A paginated closed-trade log shows each pair's legs, entry and exit prices, shares, fees, exit reason, and realized P&L.
+Market metadata and official outcomes come from Polymarket Gamma. The live order books use a Polymarket CLOB WebSocket subscription for the active BTC and ETH token IDs. The mobile-first dashboard puts balance and performance at the top, followed by an all-pairs P&L summary for the latest five 5-minute windows (newest first), the two enabled mixed-pair cards, and any disabled pair still managing an older open position. Closed windows show realized net P&L; live windows combine realized P&L with fresh floating marks; unresolved windows show the last pre-expiry mark as provisional. A paginated closed-trade log shows each pair's legs, entry and exit prices, shares, fees, exit reason, and realized P&L.
 
 ## Persistent paper history
 

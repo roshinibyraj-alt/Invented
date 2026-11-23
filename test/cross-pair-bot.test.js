@@ -557,3 +557,23 @@ test('closed-pair log pages include both legs, realized P&L, exits, and fill aud
   assert.ok(page.records[0].legs.every(leg => leg.position?.exitPrice !== null));
   assert.ok(page.records[0].legs.every(leg => leg.order?.executionAudit?.simulatedFills));
 });
+
+test('five-window P&L combines closed results and live marks, newest window first', () => {
+  const { bot, getNow } = createBot();
+  bot.evaluateCrossPairs(getNow());
+  const firstCycle = bot.crossPairCycles.find(cycle => cycle.pairId === 'btc-up-eth-down');
+  settlePair(bot, firstCycle, 'UP', 'DOWN', getNow() + 10);
+
+  const history = bot.snapshot().windowPnlHistory;
+  assert.equal(history.length, 5);
+  assert.equal(history[0].windowStart, START);
+  assert.equal(history[0].status, 'LIVE');
+  assert.equal(history[0].pairCount, 2);
+  assert.equal(history[0].legCount, 4);
+  assert.equal(history[0].realizedPnl, firstCycle.realizedPnl);
+  assert.ok(Number.isFinite(history[0].floatingPnl));
+  assert.equal(history[0].pnl, Number((history[0].realizedPnl + history[0].floatingPnl).toFixed(6)));
+  assert.equal(history[1].status, 'NO_TRADES');
+  assert.equal(history[1].pnl, 0);
+  assert.ok(history[1].windowStart < history[0].windowStart);
+});

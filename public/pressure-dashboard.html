@@ -213,6 +213,20 @@
     .trade-history { display:grid; gap:7px; }
     .closed-trade-list { display:grid; gap:8px; max-height:760px; overflow:auto; overscroll-behavior:contain; }
     .closed-log-note { margin:0 0 9px; color:var(--muted); font-size:9px; }
+    .window-pnl-list { display:grid; gap:7px; }
+    .window-pnl-row { padding:11px 12px; border:1px solid var(--line); border-left:4px solid #9aa69a; border-radius:12px; background:var(--paper); box-shadow:var(--shadow); }
+    .window-pnl-row.positive { border-left-color:var(--green); }
+    .window-pnl-row.negative { border-left-color:var(--coral); }
+    .window-pnl-row .window-row-head { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+    .window-pnl-row .window-time { font-size:11px; font-weight:900; font-variant-numeric:tabular-nums; }
+    .window-pnl-row .window-state { padding:4px 6px; border-radius:6px; color:#59675d; background:#eef0e9; font-size:8px; font-weight:900; text-transform:uppercase; }
+    .window-pnl-row .window-state.live { color:#176e4c; background:#e1f2e7; }
+    .window-pnl-row .window-state.pending { color:#89650e; background:#fff1c6; }
+    .window-pnl-row .window-value-line { display:flex; justify-content:space-between; align-items:flex-end; gap:8px; margin-top:8px; }
+    .window-pnl-row .window-value { font-size:22px; line-height:1; font-weight:950; letter-spacing:-.05em; font-variant-numeric:tabular-nums; }
+    .window-pnl-row .window-pnl-caption { color:var(--muted); font-size:8px; text-align:right; }
+    .window-pnl-row .window-breakdown { margin-top:7px; color:var(--muted); font-size:9px; }
+    .window-pnl-row .window-meta { margin-top:4px; color:var(--muted); font-size:8px; }
     .load-more-closed { display:block; width:100%; margin-top:10px; padding:11px 12px; border:1px solid #dce2d8; border-radius:10px; background:#f5f7f1; color:var(--ink); font:inherit; font-size:10px; font-weight:900; cursor:pointer; }
     .load-more-closed:disabled { opacity:.6; cursor:wait; }
     .closed-log-error { margin:8px 0 0; color:#a94739; font-size:9px; }
@@ -344,6 +358,17 @@
         <article class="metric"><div class="metric-label">Available cash</div><div class="metric-value" id="cash">—</div><small class="metric-detail" id="capitalDetail">Paper balance</small></article>
         <article class="metric"><div class="metric-label">Realized P&amp;L</div><div class="metric-value" id="realized">—</div><small class="metric-detail">Resolved paper trades</small></article>
         <article class="metric"><div class="metric-label">Unrealized P&amp;L</div><div class="metric-value" id="unrealized">—</div><small class="metric-detail">Current live marks</small></article>
+      </div>
+    </section>
+
+    <section class="section" aria-label="Last five windows combined profit and loss">
+      <div class="section-head">
+        <div><div class="section-kicker">All pair legs combined</div><h2>Last 5 windows · P&amp;L</h2></div>
+        <span class="count-chip">Most recent first</span>
+      </div>
+      <p class="closed-log-note">Closed windows show realized net P&amp;L. Open positions use live marks; unresolved windows show the last mark and remain provisional.</p>
+      <div class="window-pnl-list" id="windowPnlHistory" aria-live="polite">
+        <div class="empty">Loading recent window results…</div>
       </div>
     </section>
 
@@ -720,6 +745,45 @@
         }).join('') : '<div class="empty">Waiting for the two mixed-direction pair markets.</div>';
       }
 
+      function renderWindowPnlHistory(windows) {
+        const rows = Array.isArray(windows) ? windows : [];
+        $('windowPnlHistory').innerHTML = rows.length ? rows.map(window => {
+          const status = String(window.status || 'NO_TRADES');
+          const statusLabel = status.replaceAll('_', ' ');
+          const rowClass = hasNumber(window.pnl) ? signClass(window.pnl) : 'neutral';
+          const stateClass = status === 'LIVE' ? 'live'
+            : status === 'PENDING_RESOLUTION' ? 'pending' : '';
+          const caption = status === 'CLOSED' ? 'Realized net P&L'
+            : status === 'LIVE' ? 'Realized + live floating'
+              : status === 'PENDING_RESOLUTION' ? 'Last mark · awaiting result'
+                : status === 'NO_TRADES' ? 'No entries this window'
+                  : 'P&L mark incomplete';
+          const breakdown = status === 'LIVE'
+            ? `Realized ${money(window.realizedPnl)} · Live floating ${money(window.floatingPnl)}`
+            : status === 'PENDING_RESOLUTION'
+              ? `Realized ${money(window.realizedPnl)} · Last mark ${money(window.pendingMarkPnl)}`
+              : status === 'CLOSED'
+                ? `Realized net after modeled fees: ${money(window.realizedPnl)}`
+                : status === 'NO_TRADES' ? 'No pair entries recorded.'
+                  : `${Number(window.unmarkedPositionCount) || 0} position mark(s) unavailable.`;
+          const tradeMeta = window.legCount
+            ? `${Number(window.pairCount) || 0} pair entries · ${Number(window.legCount) || 0} legs`
+            : 'No trades';
+          return `<article class="window-pnl-row ${rowClass}">
+            <div class="window-row-head">
+              <span class="window-time">${safe(dateTime(window.windowStart))}</span>
+              <span class="window-state ${stateClass}">${safe(statusLabel)}</span>
+            </div>
+            <div class="window-value-line">
+              <strong class="window-value ${rowClass}">${money(window.pnl)}</strong>
+              <span class="window-pnl-caption">${safe(caption)}</span>
+            </div>
+            <div class="window-breakdown">${safe(breakdown)}</div>
+            <div class="window-meta">${safe(tradeMeta)}</div>
+          </article>`;
+        }).join('') : '<div class="empty">Recent window P&amp;L will appear as state updates arrive.</div>';
+      }
+
       function renderClosedPairLogs() {
         const marketStart = latestState?.markets?.find(market =>
           String(market.asset).toUpperCase() === 'BTC')?.start ?? null;
@@ -914,6 +978,7 @@
         $('unrealized').textContent = money(account.unrealizedPnl);
         $('unrealized').className = `metric-value ${signClass(account.unrealizedPnl)}`;
         $('capitalDetail').textContent = `Initial capital ${money(account.initialCapital)}`;
+        renderWindowPnlHistory(latestState.windowPnlHistory);
         const strategy = latestState.strategy || {};
         const resolutionPollSeconds = Number(strategy.resolutionPollMs) / 1000;
         $('resolutionPolling').textContent = Number.isFinite(resolutionPollSeconds) && resolutionPollSeconds > 0

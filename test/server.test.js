@@ -83,6 +83,9 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   assert.match(html, /Entry proof/);
   assert.match(html, /Closed pair log/);
   assert.match(html, /closed-pair-logs/);
+  assert.match(html, /Last 5 windows · P&amp;L/);
+  assert.match(html, /windowPnlHistory/);
+  assert.match(html, /Closed windows show realized net/);
   assert.match(html, /Performance, market detail, fill checks, and history/);
   assert.match(html, /BTC UP \+ ETH DOWN and ETH UP \+ BTC DOWN remain enabled/);
   assert.match(html, /Two mixed pairs \+ ask-sum entries/);
