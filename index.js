@@ -7,7 +7,7 @@ async function main() {
     return;
   }
 
-  const Bot = require('./dip-bounce-bot');
+  const Bot = require('./cross-pair-bot');
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
@@ -19,14 +19,21 @@ async function main() {
   }
   const bot = new Bot({ ledgerStore });
   const savedLedger = ledgerStore?.load() || PaperLedgerStore.decodeBootstrap(process.env.PAPER_LEDGER_BOOTSTRAP);
-  if (savedLedger) {
+  const savedStrategyId = savedLedger?.snapshot?.strategy?.id || savedLedger?.strategyId;
+  if (savedLedger && savedStrategyId === Bot.STRATEGY.id) {
     bot.restoreLedger(savedLedger);
+    await bot.flushLedger();
+  } else if (savedLedger) {
+    bot.log('Paper history reset for the new BTC/ETH cross-pair strategy.', {
+      type: 'LEDGER_RESET',
+      now: Date.now(),
+    });
     await bot.flushLedger();
   }
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- BTC/ETH 5-minute dip-and-bounce paper strategy; no live orders are sent.');
+  console.log('MODE: DEMO -- BTC/ETH 5-minute cross-pair paper strategy; no live orders are sent.');
 
   let stopping = false;
   const shutdown = async () => {

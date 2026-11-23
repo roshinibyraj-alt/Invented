@@ -162,7 +162,9 @@
     .sizing-card { min-width:0; padding:11px 12px; border:1px solid #dce7d8; border-radius:14px; background:#f8fbf2; }
     .sizing-card[data-asset="BTC"] { border-top:4px solid #e2b632; }
     .sizing-card[data-asset="ETH"] { border-top:4px solid #7887dd; }
-    .sizing-label { display:flex; justify-content:space-between; gap:6px; color:var(--muted); font-size:9px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
+    .sizing-card[data-pair="btc-up-eth-down"] { border-top:4px solid #e2b632; }
+    .sizing-card[data-pair="eth-up-btc-down"] { border-top:4px solid #7887dd; }
+    .sizing-label { display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; gap:6px; color:var(--muted); font-size:9px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
     .sizing-value { display:block; margin-top:6px; font-size:23px; line-height:1; font-weight:950; letter-spacing:-.06em; font-variant-numeric:tabular-nums; }
     .sizing-note { display:block; margin-top:6px; color:var(--muted); font-size:9px; }
     .sizing-result { color:#657167; font-size:8px; font-weight:850; }
@@ -249,9 +251,9 @@
 
     <section class="hero" aria-labelledby="pageTitle">
       <div class="hero-copy">
-        <div class="eyebrow">Two active 5-minute markets</div>
+        <div class="eyebrow">Two independent cross-pair entries</div>
         <h1 id="pageTitle">The market pulse, at a glance.</h1>
-        <p>BTC and ETH only · 5-minute markets · independent sizing progress for each asset.</p>
+        <p>BTC UP + ETH DOWN and ETH UP + BTC DOWN · 5-minute paper markets · independent sizing for each pair.</p>
       </div>
       <div class="hero-side">
         <div class="hero-stat"><span>Markets live</span><strong id="marketLiveCount">— / 2</strong></div>
@@ -270,14 +272,14 @@
         <div><div class="section-kicker">Live first</div><h2 id="positionsHeading">Positions &amp; orders</h2></div>
         <div class="section-note">Paper simulation only · no real orders</div>
       </div>
-      <div class="sizing-grid" id="sizingGrid" aria-label="Next paper entry size by asset">
-        <div class="sizing-card" data-asset="BTC"><span class="sizing-label">BTC next size</span><strong class="sizing-value">100 shares</strong><small class="sizing-note">Base size</small></div>
-        <div class="sizing-card" data-asset="ETH"><span class="sizing-label">ETH next size</span><strong class="sizing-value">100 shares</strong><small class="sizing-note">Base size</small></div>
+      <div class="sizing-grid" id="sizingGrid" aria-label="Cross-pair entry status and next size">
+        <div class="sizing-card" data-pair="btc-up-eth-down"><span class="sizing-label">BTC UP + ETH DOWN</span><strong class="sizing-value">100 shares / leg</strong><small class="sizing-note">Waiting for asks below $0.80 combined</small></div>
+        <div class="sizing-card" data-pair="eth-up-btc-down"><span class="sizing-label">ETH UP + BTC DOWN</span><strong class="sizing-value">100 shares / leg</strong><small class="sizing-note">Waiting for asks below $0.80 combined</small></div>
       </div>
       <p class="persistence-note" id="ledgerPersistence" aria-live="polite">Paper history storage status: checking</p>
       <div class="split">
         <article class="panel">
-          <div class="panel-head"><div><h3>Open positions</h3><p>Live best-bid marks and floating P&amp;L</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
+          <div class="panel-head"><div><h3>Open positions</h3><p>Live best-bid marks and floating P&amp;L · held to resolution</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
           <div class="position-list" id="positionList"><div class="empty">Loading paper positions…</div></div>
         </article>
         <article class="panel">
@@ -302,8 +304,8 @@
 
     <section class="section" aria-labelledby="marketsHeading">
       <div class="section-head">
-        <div><div class="section-kicker">BTC + ETH · 5m only</div><h2 id="marketsHeading">Live market board</h2></div>
-        <div class="section-note">Midpoint is the signal · bid/ask is the book</div>
+        <div><div class="section-kicker">BTC + ETH · 5m only</div><h2 id="marketsHeading">Live market books</h2></div>
+        <div class="section-note">Combined best asks trigger each cross-pair</div>
       </div>
       <div class="section-note" id="marketCount">0 windows</div>
       <div class="market-grid" id="marketGrid" aria-live="polite">
@@ -332,16 +334,16 @@
 
     <section class="section strategy-card" aria-labelledby="strategyHeading">
       <div class="strategy-title">
-        <div><div class="eyebrow">Strategy rules</div><h3 id="strategyHeading">Midpoint dip → bounce</h3></div>
+        <div><div class="eyebrow">Strategy rules</div><h3 id="strategyHeading">Cross-pair ask-sum entry</h3></div>
         <span class="paper-stamp">PAPER SIMULATION</span>
       </div>
       <div>
         <div class="strategy-steps">
-          <div class="strategy-step"><span class="step-num">1</span><div><strong>Watch both sides; allow only the first trigger</strong><span>Track both midpoints, but once one side qualifies and triggers an entry, block the opposite side for that market window.</span></div></div>
-          <div class="strategy-step"><span class="step-num">2</span><div><strong>Arm below $0.35; trigger at or above $0.50</strong><span>Once a side's midpoint dips under $0.35, the first side to later reach $0.50 or higher takes the window's single entry.</span></div></div>
-          <div class="strategy-step"><span class="step-num">3</span><div><strong>Adaptive-size taker buy</strong><span>Each asset starts at 100 shares. Sweep visible asks up to $0.99 using that asset’s next size; actual average price and entry fees apply.</span></div></div>
-          <div class="strategy-step"><span class="step-num">4</span><div><strong>Reset to 100 after +$40 recovery</strong><span>After a loss, add 100 shares; after a win, subtract 100, never below the 100-share floor. Track each asset’s realized net P&amp;L after fees; when its loss-recovery round reaches +$40, reset its next size straight to 100. BTC and ETH stay separate.</span></div></div>
-          <div class="strategy-step"><span class="step-num">5</span><div><strong>$0.99 TP win is not a sell; $0 stop is a loss</strong><span>TP credits a modeled $1 per share. The zero stop records zero payout without a sell order or sell fee. Otherwise, positions wait for official resolution.</span></div></div>
+          <div class="strategy-step"><span class="step-num">1</span><div><strong>Evaluate both combinations independently</strong><span>BTC UP + ETH DOWN and ETH UP + BTC DOWN can each trigger in the same 5-minute window.</span></div></div>
+          <div class="strategy-step"><span class="step-num">2</span><div><strong>Enter when combined best asks are below $0.80</strong><span>Each pair has one entry per window. Both current best asks must be fresh, and their sum must be strictly below $0.80.</span></div></div>
+          <div class="strategy-step"><span class="step-num">3</span><div><strong>Buy 100 shares on each leg</strong><span>Paper taker orders sweep visible asks up to $0.99. Actual filled shares, average prices, and modeled taker fees are recorded.</span></div></div>
+          <div class="strategy-step"><span class="step-num">4</span><div><strong>Hold filled legs to official resolution</strong><span>No take-profit or stop-loss closes positions early. A pair’s next sizing decision waits until both filled legs resolve.</span></div></div>
+          <div class="strategy-step"><span class="step-num">5</span><div><strong>Increase only after both legs lose</strong><span>If both legs lose, that pair’s next entry is 1,000 shares per leg. If at least one leg wins, keep 100. After a 1,000-share entry resolves, return to 100 whether it wins or loses.</span></div></div>
         </div>
         <div class="strategy-meta">
           <span class="meta-pill">Taker entry fees included</span>
@@ -393,8 +395,9 @@
         const item = data || {};
         const orderStatus = label(item.orderStatus, 'Watching');
         const normalized = orderStatus.toLowerCase();
-        const stateClass = normalized.includes('fill') ? 'filled' :
-          (normalized.includes('order') || normalized.includes('armed') || normalized.includes('trigger')) ? 'armed' : '';
+        const stateClass = normalized.includes('fill') || normalized.includes('position') ? 'filled' :
+          (normalized.includes('order') || normalized.includes('armed') || normalized.includes('trigger') ||
+           normalized.includes('ready')) ? 'armed' : '';
         return `<section class="side-card ${side.toLowerCase()}">
           <div class="side-head"><span class="side-name">${side}</span><span class="order-state ${stateClass}">${safe(orderStatus)}</span></div>
           <div class="midpoint">${money(item.mid, 3)} <small>mid</small></div>
@@ -403,10 +406,10 @@
             <div class="book-cell"><span>Best ask</span><strong>${money(item.bestAsk, 3)}</strong></div>
           </div>
           <div class="side-flags">
-            <span class="flag ${item.dipSeen ? 'yes' : 'no'}">Dip ${item.dipSeen ? 'seen' : '—'}</span>
-            <span class="flag ${item.bounceSeen ? 'yes' : 'no'}">Bounce ${item.bounceSeen ? 'seen' : '—'}</span>
+            <span class="flag">${safe(label(item.pairLabel, 'Cross-pair leg'))}</span>
+            <span class="flag">${item.fresh ? 'Fresh quote' : 'Waiting for quote'}</span>
           </div>
-          <div class="card-foot"><span>Sweep cap <strong>${money(item.limitPrice, 2)}</strong></span><span>Filled <strong>${shares(item.filledShares)}/${shares(item.requestedShares)}</strong></span></div>
+          <div class="card-foot"><span>Pair shares <strong>${shares(item.filledShares)}</strong></span><span>Current ask <strong>${money(item.bestAsk, 3)}</strong></span></div>
         </section>`;
       }
 
@@ -443,20 +446,25 @@
           : '<div class="empty">Waiting for the current BTC and ETH 5-minute markets.</div>';
       }
 
-      function renderSizing(sizingByAsset) {
-        const sizing = sizingByAsset || {};
-        $('sizingGrid').innerHTML = ['BTC', 'ETH'].map((asset) => {
-          const state = sizing[asset] || {};
-          const nextShares = hasNumber(state.nextShares) ? Number(state.nextShares) : 100;
-          const outcome = String(state.lastOutcome || '').toUpperCase();
-          const outcomeClass = outcome === 'WIN' ? 'win' : outcome === 'LOSS' ? 'loss' : '';
-          const roundNote = state.recoveryActive
-            ? `Recovery round net ${money(state.recoveryNetPnl)} · reset at +$40`
-            : `No recovery round · ${Number(state.recoveryResetCount) || 0} resets`;
-          const note = `${outcome ? `Last ${outcome.toLowerCase()} · ` : ''}${Number(state.wins) || 0}W / ${Number(state.losses) || 0}L · ${roundNote}`;
-          return `<article class="sizing-card" data-asset="${asset}">
-            <span class="sizing-label">${asset} next entry <span class="sizing-result ${outcomeClass}">${safe(outcome || 'BASE')}</span></span>
-            <strong class="sizing-value">${shares(nextShares)} shares</strong>
+      function renderSizing(pairs) {
+        const byId = new Map((Array.isArray(pairs) ? pairs : []).map(pair => [pair.id, pair]));
+        $('sizingGrid').innerHTML = [
+          ['btc-up-eth-down', 'BTC UP + ETH DOWN'],
+          ['eth-up-btc-down', 'ETH UP + BTC DOWN'],
+        ].map(([id, fallbackLabel]) => {
+          const pair = byId.get(id) || {};
+          const nextShares = hasNumber(pair.nextSharesPerLeg) ? Number(pair.nextSharesPerLeg) : 100;
+          const status = String(pair.status || 'WAITING_FOR_QUOTES').replaceAll('_', ' ');
+          const outcome = String(pair.lastOutcome || '').replaceAll('_', ' ');
+          const outcomeClass = pair.lastOutcome === 'BOTH_LEGS_LOST' ? 'loss' :
+            pair.lastOutcome ? 'win' : '';
+          const askText = hasNumber(pair.combinedAsk)
+            ? `Combined asks ${money(pair.combinedAsk, 3)} · trigger below $0.80`
+            : 'Waiting for fresh asks on both legs';
+          const note = `${status}${outcome ? ` · last result: ${outcome}` : ''} · ${askText}`;
+          return `<article class="sizing-card" data-pair="${safe(id)}">
+            <span class="sizing-label">${safe(label(pair.label, fallbackLabel))}<span class="sizing-result ${outcomeClass}">${safe(status)}</span></span>
+            <strong class="sizing-value">${shares(nextShares)} shares / leg</strong>
             <small class="sizing-note">${safe(note)}</small>
           </article>`;
         }).join('');
@@ -497,7 +505,7 @@
           const pnl = position.unrealizedPnl;
           return `<article class="position-card ${side.toLowerCase()}">
             <div class="position-top">
-              <div class="position-title"><strong>${safe(label(position.asset))} ${safe(label(position.timeframe))} · ${safe(side || '—')}</strong><small>${safe(label(position.marketTitle, 'Market'))} · ends ${safe(clockTime(position.windowEnd))}</small></div>
+              <div class="position-title"><strong>${safe(label(position.asset))} ${safe(label(position.timeframe))} · ${safe(side || '—')}</strong><small>${safe(label(position.pairLabel, position.marketTitle || 'Market'))} · ends ${safe(clockTime(position.windowEnd))}</small></div>
               <span class="badge-side ${side === 'DOWN' ? 'down' : ''}">${safe(label(position.status))}</span>
             </div>
             <div class="position-values">
@@ -590,7 +598,7 @@
         $('unrealized').className = `metric-value ${signClass(account.unrealizedPnl)}`;
         $('capitalDetail').textContent = `Initial capital ${money(account.initialCapital)}`;
         const strategy = latestState.strategy || {};
-        $('strategyVersion').textContent = `${label(strategy.name, 'BTC/ETH 5m dip and bounce')} · ${label(strategy.version, '—')}`;
+        $('strategyVersion').textContent = `${label(strategy.name, 'BTC/ETH cross-pair')} · ${label(strategy.version, '—')}`;
         $('drawdown').textContent = `Max DD ${money(account.maxDrawdown)}${hasNumber(account.maxDrawdownPercent) ? ` · ${Number(account.maxDrawdownPercent).toFixed(1)}%` : ''}`;
         $('winRate').textContent = `Win rate ${hasNumber(account.winRate) ? `${Number(account.winRate).toFixed(1)}%` : '—'}`;
         $('winsLosses').textContent = `${Number(account.wins) || 0} wins · ${Number(account.losses) || 0} losses`;
@@ -598,7 +606,7 @@
         const socketTime = socket.lastMessageAt ? ` · last book ${clockTime(socket.lastMessageAt)}` : '';
         $('marketCount').setAttribute('title', `Feed ${label(socket.status, 'waiting')}${socketTime}`);
         renderMarkets(markets);
-        renderSizing(latestState.sizingByAsset);
+        renderSizing(latestState.crossPairs);
         renderPositions(latestState.positions);
         renderOrders(latestState.orders);
         renderEvents(latestState.events);

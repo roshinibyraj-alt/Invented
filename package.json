@@ -1,8 +1,8 @@
 {
-  "name": "invented-btc-eth-5m-dip-bounce-paper-bot",
+  "name": "invented-btc-eth-5m-cross-pair-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only BTC and ETH 5-minute dip-and-bounce strategy with independent share sizing.",
+  "description": "Paper-only BTC/ETH 5-minute cross-pair strategy with outcome-based pair sizing.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

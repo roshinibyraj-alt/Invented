@@ -1,10 +1,10 @@
 'use strict';
 
-const CrossTimeframeArbitrageBot = require('./cross-timeframe-arbitrage-bot');
+const CrossPairBot = require('./cross-pair-bot');
 
 class MultiBot {
   constructor(options = {}) {
-    this.bot = options.bot || new CrossTimeframeArbitrageBot(options);
+    this.bot = options.bot || new CrossPairBot(options);
   }
 
   start() {

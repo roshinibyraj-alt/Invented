@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard serves the BTC and ETH 5-minute strategy', async t => {
+test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -52,18 +52,17 @@ test('dashboard serves the BTC and ETH 5-minute strategy', async t => {
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented/);
-  assert.match(html, /Two active 5-minute markets/);
-  assert.match(html, /BTC and ETH only/);
-  assert.match(html, /Midpoint dip → bounce/);
-  assert.match(html, /below \$0\.35/);
-  assert.match(html, /first side to later reach \$0\.50 or higher/);
-  assert.match(html, /Adaptive-size taker buy/);
-  assert.match(html, /100-share floor/);
-  assert.match(html, /Reset to 100 after \+\$40 recovery/);
+  assert.match(html, /Two independent cross-pair entries/);
+  assert.match(html, /BTC UP \+ ETH DOWN and ETH UP \+ BTC DOWN/);
+  assert.match(html, /Cross-pair ask-sum entry/);
+  assert.match(html, /below \$0\.80/);
+  assert.match(html, /Buy 100 shares on each leg/);
+  assert.match(html, /Increase only after both legs lose/);
+  assert.match(html, /1,000 shares per leg/);
   assert.match(html, /History is saved in persistent Railway storage/);
-  assert.match(html, /Sweep visible asks up to \$0\.99/);
-  assert.match(html, /\$0\.99 TP win is not a sell; \$0 stop is a loss/);
-  assert.match(html, /only the first trigger/);
+  assert.match(html, /sweep visible asks up to \$0\.99/);
+  assert.match(html, /No take-profit or stop-loss closes positions early/);
+  assert.match(html, /both filled legs resolve/);
   assert.match(html, /official resolution/);
   assert.match(html, /SIMULATION ONLY/);
   assert.match(html, /positionList/);
