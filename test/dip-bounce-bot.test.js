@@ -73,6 +73,63 @@ test('scans only BTC and ETH 5-minute markets and subscribes to their CLOB token
   bot.stop();
 });
 
+test('ignores price deltas until a full current-window book snapshot is received', () => {
+  const start = 1_800_000_000_000;
+  const { bot } = makeBot({ now: start + 1000 });
+  const record = setMarket(bot, 'BTC', '5m', start);
+  bot.syncMarketStream();
+  const tokenId = record.market.tokens.UP;
+
+  bot.handleMarketMessage({
+    event_type: 'price_change',
+    timestamp: start + 900,
+    asset_id: tokenId,
+    side: 'SELL',
+    price: '0.25',
+    size: '100',
+  });
+
+  assert.equal(record.quotes.UP.status, 'MISSING');
+  assert.equal(record.books.UP.asks.length, 0);
+});
+
+test('ignores out-of-order and pre-window CLOB book updates', () => {
+  const start = 1_800_000_000_000;
+  const { bot } = makeBot({ now: start + 1000 });
+  const record = setMarket(bot, 'BTC', '5m', start);
+  bot.syncMarketStream();
+  const tokenId = record.market.tokens.UP;
+
+  bot.handleMarketMessage({
+    event_type: 'book',
+    timestamp: start + 900,
+    asset_id: tokenId,
+    bids: [{ price: '0.30', size: '500' }],
+    asks: [{ price: '0.31', size: '500' }],
+  });
+  assert.equal(record.quotes.UP.bestAsk, 0.31);
+
+  bot.handleMarketMessage({
+    event_type: 'book',
+    timestamp: start + 800,
+    asset_id: tokenId,
+    bids: [{ price: '0.10', size: '500' }],
+    asks: [{ price: '0.11', size: '500' }],
+  });
+  assert.equal(record.quotes.UP.bestAsk, 0.31);
+
+  bot.handleMarketMessage({
+    event_type: 'book',
+    timestamp: start - 1,
+    asset_id: record.market.tokens.DOWN,
+    bids: [{ price: '0.20', size: '500' }],
+    asks: [{ price: '0.21', size: '500' }],
+  });
+  assert.equal(record.quotes.DOWN.status, 'MISSING');
+  assert.equal(record.quotes.UP.marketId, record.market.id);
+  assert.equal(record.quotes.UP.tokenId, tokenId);
+});
+
 test('only a midpoint strictly below $0.35 arms a side', () => {
   const { bot, setNow } = makeBot();
   const start = 1_800_000_000_000;

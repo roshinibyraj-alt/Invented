@@ -70,7 +70,7 @@
     }
     .hero-copy, .hero-side { position:relative; z-index:1; }
     .eyebrow { color:#b8d86c; font-size:10px; font-weight:900; letter-spacing:.15em; text-transform:uppercase; }
-    h1 { max-width:700px; margin:8px 0 0; font-size:clamp(29px,8vw,52px); line-height:.98; letter-spacing:-.065em; }
+    h1 { max-width:700px; margin:8px 0 0; font-size:clamp(25px,6vw,38px); line-height:1; letter-spacing:-.055em; }
     .hero-copy p { max-width:560px; margin:13px 0 0; color:#c6d6c8; font-size:13px; }
     .hero-side { display:grid; grid-template-columns:1fr 1fr; gap:8px; align-content:end; }
     .hero-stat { min-width:0; padding:12px 13px; border:1px solid rgba(255,255,255,.13); border-radius:15px; background:rgba(255,255,255,.07); }
@@ -85,6 +85,12 @@
     .retry { border:0; border-radius:10px; padding:9px 12px; color:#fff; background:#a94337; font-size:11px; font-weight:850; cursor:pointer; }
     .retry:hover { background:#8f332a; }
     .section { margin-top:22px; }
+    .feed-strip { display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin-top:12px; padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:var(--paper); color:var(--muted); font-size:10px; }
+    .feed-strip strong { color:var(--ink); }
+    .feed-dot { width:8px; height:8px; flex:none; border-radius:50%; background:#9aab98; }
+    .feed-strip.connected .feed-dot { background:var(--green); box-shadow:0 0 0 3px #dff2e5; }
+    .feed-strip.warn .feed-dot { background:#c08b18; }
+    .feed-strip.bad .feed-dot { background:var(--coral); }
     .section-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; margin:0 2px 11px; }
     .section-kicker { color:var(--muted); font-size:10px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; }
     h2 { margin:2px 0 0; font-size:20px; letter-spacing:-.045em; }
@@ -175,6 +181,11 @@
     .pair-summary div { min-width:0; padding:8px; border-radius:10px; background:#f2f4ee; }
     .pair-summary span { display:block; color:var(--muted); font-size:8px; font-weight:850; letter-spacing:.05em; text-transform:uppercase; }
     .pair-summary strong { display:block; overflow:hidden; margin-top:3px; font-size:12px; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums; }
+    .pair-leg-quotes { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+    .pair-leg-quotes > span { display:grid; grid-template-columns:1fr auto; gap:2px 5px; min-width:0; padding:7px 8px; border-radius:9px; background:#f5f6f2; color:var(--muted); font-size:9px; font-weight:800; }
+    .pair-leg-quotes strong { color:var(--ink); font-size:11px; font-variant-numeric:tabular-nums; }
+    .pair-leg-quotes small { grid-column:1/-1; color:var(--muted); font-size:8px; font-weight:700; }
+    .pair-leg-quotes .stale { background:#fff3e0; }
     .trade-card { min-width:0; padding:10px; border:1px solid #e7ebe2; border-radius:13px; background:#fbfcf8; }
     .trade-card.recent { background:#f7f8f4; }
     .trade-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:8px; }
@@ -200,6 +211,9 @@
     .trade-history summary { color:var(--muted); font-size:9px; font-weight:850; cursor:pointer; }
     .trade-history-list { display:grid; gap:7px; margin-top:8px; }
     .trade-history { display:grid; gap:7px; }
+    .fill-audit { margin-top:7px; padding-top:6px; border-top:1px dashed #dfe5d9; }
+    .fill-audit summary { color:#58665c; font-size:8px; font-weight:850; cursor:pointer; }
+    .fill-audit-content { display:grid; gap:4px; margin-top:6px; color:var(--muted); font-size:8px; overflow-wrap:anywhere; }
     .sizing-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:11px; }
     .sizing-card { min-width:0; padding:11px 12px; border:1px solid #dce7d8; border-radius:14px; background:#f8fbf2; }
     .sizing-card[data-asset="BTC"] { border-top:4px solid #e2b632; }
@@ -227,6 +241,10 @@
     .chart-area { fill:rgba(61,120,208,.1); }
     .chart-empty { padding:25px 10px; color:var(--muted); text-align:center; font-size:11px; }
     .strategy-card { display:grid; gap:13px; padding:18px; border-radius:20px; color:#253522; background:var(--lime); }
+    .advanced-panel { margin-top:18px; border:1px solid var(--line); border-radius:16px; background:rgba(255,255,255,.55); }
+    .advanced-panel > summary { padding:13px 15px; color:#405047; font-size:11px; font-weight:900; cursor:pointer; }
+    .advanced-content { padding:0 13px 14px; }
+    .advanced-content .section { margin-top:14px; }
     .strategy-title { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
     .strategy-title h3 { margin:3px 0 0; font-size:20px; letter-spacing:-.045em; }
     .strategy-title .eyebrow { color:#566b28; }
@@ -295,9 +313,9 @@
 
     <section class="hero" aria-labelledby="pageTitle">
       <div class="hero-copy">
-        <div class="eyebrow">Four independent cross-pair entries</div>
-        <h1 id="pageTitle">The market pulse, at a glance.</h1>
-        <p>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN · each pair uses a fixed 100 shares per leg.</p>
+        <div class="eyebrow">BTC + ETH · 5-minute paper bot</div>
+        <h1 id="pageTitle">Live pairs and results</h1>
+        <p>Four cross-pairs are monitored independently. Each entry requests 100 shares on each leg.</p>
       </div>
       <div class="hero-side">
         <div class="hero-stat"><span>Markets live</span><strong id="marketLiveCount">— / 2</strong></div>
@@ -324,6 +342,29 @@
       </div>
     </section>
 
+    <div class="feed-strip warn" id="feedStatus" aria-live="polite">
+      <span class="feed-dot" aria-hidden="true"></span>
+      <strong>Polymarket price feed</strong>
+      <span id="feedState">Connecting</span>
+      <span>· Latest quote <span id="feedAge">—</span></span>
+    </div>
+    <section class="section" aria-labelledby="positionsHeading">
+      <div class="section-head">
+        <div><div class="section-kicker">Live status · 100 shares per leg</div><h2 id="positionsHeading">Four cross-pairs</h2></div>
+        <div class="section-note">Current ask sum and position P&amp;L</div>
+      </div>
+      <div class="pair-grid" id="sizingGrid" aria-label="Cross-pair trades and sizing">
+        <div class="loading-card" aria-label="Loading BTC UP plus ETH DOWN"></div>
+        <div class="loading-card" aria-label="Loading ETH UP plus BTC DOWN"></div>
+        <div class="loading-card" aria-label="Loading BTC UP plus ETH UP"></div>
+        <div class="loading-card" aria-label="Loading BTC DOWN plus ETH DOWN"></div>
+      </div>
+      <p class="persistence-note" id="ledgerPersistence" aria-live="polite">Paper history storage status: checking</p>
+    </section>
+
+    <details class="advanced-panel">
+      <summary>Performance, market detail, fill checks, and history</summary>
+      <div class="advanced-content">
     <section class="section" aria-label="Performance">
       <article class="panel">
         <div class="panel-head">
@@ -339,25 +380,14 @@
       </article>
     </section>
 
-    <section class="section" aria-labelledby="positionsHeading">
-      <div class="section-head">
-        <div><div class="section-kicker">Four live pair boxes</div><h2 id="positionsHeading">Cross-pair positions</h2></div>
-        <div class="section-note">Both legs, cost, live marks, and resolution status</div>
-      </div>
-      <div class="pair-grid" id="sizingGrid" aria-label="Cross-pair trades and sizing">
-        <div class="loading-card" aria-label="Loading BTC UP plus ETH DOWN"></div>
-        <div class="loading-card" aria-label="Loading ETH UP plus BTC DOWN"></div>
-        <div class="loading-card" aria-label="Loading BTC UP plus ETH UP"></div>
-        <div class="loading-card" aria-label="Loading BTC DOWN plus ETH DOWN"></div>
-      </div>
-      <p class="persistence-note" id="ledgerPersistence" aria-live="polite">Paper history storage status: checking</p>
+    <section class="section" aria-label="Open positions and recent orders">
       <div class="split">
         <article class="panel">
-          <div class="panel-head"><div><h3>All open positions</h3><p>Quick cross-check of live marks and pending outcomes</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
+          <div class="panel-head"><div><h3>All open positions</h3><p>Live marks and pending results</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
           <div class="position-list" id="positionList"><div class="empty">Loading paper positions…</div></div>
         </article>
         <article class="panel">
-          <div class="panel-head"><div><h3>Recent orders</h3><p>Actual simulated taker fills</p></div><span class="count-chip" id="orderCount">0 orders</span></div>
+          <div class="panel-head"><div><h3>Recent orders</h3><p>Simulated taker fills and source-book checks</p></div><span class="count-chip" id="orderCount">0 orders</span></div>
           <div class="list-scroll" id="orderList"><div class="empty">Loading order history…</div></div>
         </article>
       </div>
@@ -401,6 +431,8 @@
         <div class="list-scroll" id="eventList"><div class="empty">No activity yet.</div></div>
       </article>
     </section>
+      </div>
+    </details>
     <footer>Paper simulation only · No real CLOB orders · History is saved in persistent Railway storage · Open shares at window end wait for official resolution</footer>
   </main>
 
@@ -566,8 +598,34 @@
             <div><span>Exit fees</span><strong>${money(position?.exitFees, 3)}</strong></div>
           </div>
           <div class="trade-pnl"><span>${pnlLabel}</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div>
+          ${executionAuditHtml(order?.executionAudit || null)}
           <div class="sizing-note">${safe(markText)}${position?.resolutionMarkAt ? ` · ${safe(clockTime(position.resolutionMarkAt))}` : ''}</div>
         </article>`;
+      }
+
+      function executionAuditHtml(audit) {
+        if (!audit) return '';
+        const sourceAge = hasNumber(audit.sourceAgeMs) ? `${Math.round(Number(audit.sourceAgeMs))} ms` : 'unknown';
+        const asks = (Array.isArray(audit.asks) ? audit.asks : [])
+          .slice(0, 8)
+          .map(level => `${money(level.price, 3)} × ${shares(level.size)}`)
+          .join(' · ') || 'No ask levels recorded';
+        const available = (Array.isArray(audit.availableAsksAtSimulation) ? audit.availableAsksAtSimulation : [])
+          .slice(0, 8)
+          .map(level => `${money(level.price, 3)} × ${shares(level.size)}`)
+          .join(' · ') || 'none';
+        const fills = (Array.isArray(audit.simulatedFills) ? audit.simulatedFills : [])
+          .map(fill => `${shares(fill.shares)} @ ${money(fill.price, 3)}`)
+          .join(' · ') || 'No simulated fills';
+        return `<details class="fill-audit">
+          <summary>Entry proof · ask ${money(audit.bestAsk, 3)} · quote age ${safe(sourceAge)}</summary>
+          <div class="fill-audit-content">
+            <span>Market ${safe(label(audit.marketSlug, audit.marketId))} · token ${safe(label(audit.tokenId))}</span>
+            <span>Book at entry: ${safe(asks)}</span>
+            <span>Available depth used by simulation: ${safe(available)}</span>
+            <span>Fill: ${safe(fills)} · VWAP ${money(audit.averageFillPrice, 4)} · fees ${money(audit.totalEntryFees, 4)}</span>
+          </div>
+        </details>`;
       }
 
       function tradeCardHtml(cycle, recent = false, currentWindowStart = null) {
@@ -606,7 +664,6 @@
         const list = Array.isArray(pairs) ? pairs : [];
         $('sizingGrid').innerHTML = list.length ? list.map(pair => {
           const id = pair.id;
-          const nextShares = hasNumber(pair.nextSharesPerLeg) ? Number(pair.nextSharesPerLeg) : 100;
           const status = String(pair.status || 'WAITING_FOR_QUOTES').replaceAll('_', ' ');
           const outcome = String(pair.lastOutcome || '').replaceAll('_', ' ');
           const outcomeClass = pair.lastOutcome === 'PAIR_LOSS' ? 'loss' :
@@ -626,10 +683,15 @@
             <div class="pair-body">
               <div class="pair-summary">
                 <div><span>Current ask sum</span><strong>${money(pair.combinedAsk, 3)}</strong></div>
-                <div><span>Entry trigger</span><strong>&lt; $0.800</strong></div>
-                <div><span>Own pair exit</span><strong>≥ $1.220</strong></div>
-                <div><span>Next size</span><strong>${shares(nextShares)} / leg</strong></div>
+                <div><span>Entry rule</span><strong>Below $0.800</strong></div>
               </div>
+              <div class="pair-leg-quotes">
+                ${(pair.legs || []).map(leg => `<span class="${leg.fresh ? 'fresh' : 'stale'}">
+                  ${safe(leg.asset)} ${safe(leg.side)} <strong>${money(leg.bestAsk, 3)}</strong>
+                  <small>${leg.fresh && hasNumber(leg.quoteAgeMs) ? `${Math.max(0, Math.round(leg.quoteAgeMs))}ms` : 'waiting for fresh book'}</small>
+                </span>`).join('')}
+              </div>
+              <small class="sizing-note">${safe(label(pair.reason, 'Watching live asks'))}${hasNumber(pair.quoteSkewMs) ? ` · leg quote gap ${Math.round(pair.quoteSkewMs)}ms` : ''}</small>
               ${current ? tradeCardHtml(current, false, pair.windowStart) : '<div class="trade-empty">No entry in this window. Waiting for the ask sum trigger.</div>'}
               ${outcome ? `<small class="sizing-note">Previous sizing result: <strong class="${outcomeClass}">${safe(outcome)}</strong></small>` : ''}
               ${history.length ? `<details class="trade-history"><summary>Recent trades · ${trades.length - (current ? 1 : 0)} older entries</summary><div class="trade-history-list">${history.map(trade => tradeCardHtml(trade, true, pair.windowStart)).join('')}</div></details>` : ''}
@@ -747,6 +809,24 @@
         $('chartEmpty').hidden = true;
       }
 
+      function renderFeedStatus(state) {
+        const feed = $('feedStatus');
+        const websocket = state?.websocket || {};
+        const status = String(websocket.status || 'WAITING').toUpperCase();
+        $('feedState').textContent = status.replaceAll('_', ' ');
+        const ages = (Array.isArray(state?.markets) ? state.markets : [])
+          .flatMap(market => ['UP', 'DOWN'].map(side => market.sideStates?.[side]?.ageMs))
+          .filter(hasNumber)
+          .map(Number);
+        $('feedAge').textContent = ages.length
+          ? `${Math.round(Math.max(...ages))} ms max`
+          : 'no current quotes';
+        feed.className = `feed-strip ${
+          status === 'CONNECTED' ? 'connected' :
+          ['ERROR', 'OFFLINE', 'DISCONNECTED'].includes(status) ? 'bad' : 'warn'
+        }`;
+      }
+
       function render(state) {
         latestState = state || {};
         const account = latestState.account || {};
@@ -758,6 +838,7 @@
         $('statusReason').textContent = label(latestState.statusReason, 'Monitoring BTC and ETH 5-minute markets');
         $('updatedAt').textContent = `Updated ${clockTime(latestState.now)}`;
         renderLedgerPersistence(latestState.ledgerPersistence);
+        renderFeedStatus(latestState);
         $('equity').textContent = money(account.equity);
         $('cash').textContent = money(account.cash);
         $('realized').textContent = money(account.realizedPnl);

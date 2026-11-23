@@ -29,6 +29,10 @@ function setWindow(bot, start, asks, updatedAt = start + 1000) {
       asset,
       start,
       end: start + WINDOW_MS,
+      tokens: {
+        UP: `${asset.toLowerCase()}-${start}-up`,
+        DOWN: `${asset.toLowerCase()}-${start}-down`,
+      },
       feesEnabled: true,
       feeSchedule: { rate: 0 },
     };
@@ -41,7 +45,13 @@ function setWindow(bot, start, asks, updatedAt = start + 1000) {
         bestAsk: ask,
         mid: (Math.max(0.01, ask - 0.01) + ask) / 2,
         updatedAt,
+        receivedAt: updatedAt,
         sequence: updatedAt,
+        tokenId: record.market.tokens[side],
+        marketId: record.market.id,
+        marketSlug: record.market.slug,
+        windowStart: start,
+        windowEnd: start + WINDOW_MS,
         asks: [{ price: ask, size: 2000 }],
         bids: [{ price: Math.max(0.01, ask - 0.01), size: 2000 }],
       };
@@ -80,6 +90,7 @@ test('four pairs are independent and each requires a strict ask-sum below $0.80'
 
   btcUp.bestAsk = 0.35;
   btcUp.asks = [{ price: 0.35, size: 2000 }];
+  btcUp.sequence += 1;
   bot.evaluateCrossPairs(getNow());
   assert.equal(bot.positions.length, 6, 'each qualifying pair should enter independently');
   assert.deepEqual(bot.positions.map(position => position.shares), [100, 100, 100, 100, 100, 100]);
@@ -88,6 +99,82 @@ test('four pairs are independent and each requires a strict ask-sum below $0.80'
   assert.equal(bot.snapshot().crossPairs.length, 4);
   assert.equal(bot.snapshot().strategy.id, CrossPairBot.STRATEGY.id);
   assert.equal(bot.snapshot().strategy.resolutionPollMs, 5000);
+});
+
+test('entry rejects stale, wrong-market, mismatched-book, and widely skewed quotes', () => {
+  const { bot, getNow } = createBot();
+  const pair = CrossPairBot.PAIRS[0];
+  const normal = bot.pairQuotes(pair, getNow());
+  assert.equal(normal.asksFresh, true);
+
+  const staleLeg = bot.records.get('BTC:5m').quotes.UP;
+  staleLeg.updatedAt -= config.CROSS_PAIR_MAX_QUOTE_AGE_MS + 1;
+  staleLeg.receivedAt -= config.CROSS_PAIR_MAX_QUOTE_AGE_MS + 1;
+  assert.equal(bot.pairQuotes(pair, getNow()).asksFresh, false);
+
+  setWindow(bot, START, {
+    btcUp: 0.35, btcDown: 0.40, ethUp: 0.38, ethDown: 0.44,
+  }, getNow());
+  bot.records.get('BTC:5m').quotes.UP.tokenId = 'wrong-token';
+  assert.equal(bot.pairQuotes(pair, getNow()).asksFresh, false);
+
+  setWindow(bot, START, {
+    btcUp: 0.35, btcDown: 0.40, ethUp: 0.38, ethDown: 0.44,
+  }, getNow());
+  bot.records.get('ETH:5m').quotes.DOWN.updatedAt -= config.CROSS_PAIR_MAX_QUOTE_SKEW_MS + 1;
+  assert.equal(bot.pairQuotes(pair, getNow()).asksFresh, false);
+
+  setWindow(bot, START, {
+    btcUp: 0.35, btcDown: 0.40, ethUp: 0.38, ethDown: 0.44,
+  }, getNow());
+  bot.records.get('BTC:5m').quotes.UP.asks[0].price = 0.20;
+  assert.equal(bot.pairQuotes(pair, getNow()).asksFresh, false);
+});
+
+test('audit records a valid one-cent source ask and its exact simulated fill', () => {
+  const { bot, getNow } = createBot();
+  setWindow(bot, START, {
+    btcUp: 0.01,
+    btcDown: 0.40,
+    ethUp: 0.38,
+    ethDown: 0.44,
+  }, getNow());
+  const btcUp = bot.records.get('BTC:5m').quotes.UP;
+  btcUp.bestBid = null;
+  btcUp.bidSize = 0;
+  btcUp.asks = [{ price: 0.01, size: 100 }];
+  btcUp.askSize = 100;
+  btcUp.mid = null;
+
+  bot.evaluateCrossPairs(getNow());
+  const order = bot.orders.find(item =>
+    item.pairId === 'btc-up-eth-down' && item.asset === 'BTC' && item.side === 'UP');
+  assert.ok(order);
+  assert.equal(order.averagePrice, 0.01);
+  assert.equal(order.executionAudit.bestAsk, 0.01);
+  assert.deepEqual(order.executionAudit.asks, [{ price: 0.01, size: 100 }]);
+  assert.deepEqual(order.executionAudit.simulatedFills, [
+    { shares: 100, price: 0.01, value: 1, fee: 0 },
+  ]);
+});
+
+test('visible ask depth is not reused by multiple pairs on the same book update', () => {
+  const { bot, getNow } = createBot();
+  for (const record of bot.records.values()) {
+    for (const side of ['UP', 'DOWN']) {
+      record.quotes[side].asks = [{ price: record.quotes[side].bestAsk, size: 100 }];
+      record.quotes[side].askSize = 100;
+    }
+  }
+  bot.evaluateCrossPairs(getNow());
+
+  const consumedByToken = new Map();
+  for (const position of bot.positions) {
+    const key = `${position.marketId}:${position.side}`;
+    consumedByToken.set(key, (consumedByToken.get(key) || 0) + position.initialShares);
+  }
+  assert.ok([...consumedByToken.values()].every(shares => shares <= 100));
+  assert.equal(bot.pairWindowStates['btc-up-eth-up'].status, 'WAITING_FOR_VISIBLE_DEPTH');
 });
 
 test('all pair sizes stay at 100 after wins or losses', () => {

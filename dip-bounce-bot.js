@@ -145,6 +145,7 @@ class DipBounceBot {
     this.positionSequence = 0;
     this.marketUpdateSequence = 0;
     this.tokenRefs = new Map();
+    this.bookSnapshotTokens = new Set();
     this.marketStream = null;
     this.streamSignature = '';
     this.streamGeneration = 0;
@@ -486,6 +487,7 @@ class DipBounceBot {
     const signature = uniqueTokens.join('|');
     if (signature === this.streamSignature) return;
     this.closeMarketStream();
+    this.resetSubscribedBooks(uniqueTokens);
     this.streamSignature = signature;
     if (!uniqueTokens.length) {
       this.websocket = { ...this.websocket, status: 'WAITING', error: null };
@@ -512,10 +514,12 @@ class DipBounceBot {
         },
         onStatus: (status) => {
           if (generation !== this.streamGeneration) return;
+          const normalizedStatus = String(status.status || '').toUpperCase();
+          if (normalizedStatus && normalizedStatus !== 'CONNECTED') this.resetSubscribedBooks(uniqueTokens);
           this.websocket = {
             ...this.websocket,
             ...status,
-            connectedAt: status.status === 'CONNECTED' ? this.now() : this.websocket.connectedAt,
+            connectedAt: normalizedStatus === 'CONNECTED' ? this.now() : this.websocket.connectedAt,
             error: status.error || null,
           };
         },
@@ -538,6 +542,36 @@ class DipBounceBot {
     this.streamSignature = '';
   }
 
+  resetSubscribedBooks(tokenIds) {
+    const subscribed = new Set((tokenIds || []).map(String));
+    this.bookSnapshotTokens.clear();
+    for (const record of this.records.values()) {
+      if (!record.market || record.marketStatus !== 'OPEN') continue;
+      let reset = false;
+      for (const side of SIDES) {
+        const tokenId = String(record.market.tokens?.[side] || '');
+        if (!subscribed.has(tokenId)) continue;
+        record.books[side] = { bids: [], asks: [] };
+        record.quotes[side] = quoteFromBook({}, null, ++this.marketUpdateSequence);
+        reset = true;
+      }
+      if (reset) this.scheduleLedgerSave();
+    }
+  }
+
+  marketEventIsCurrent(record, side, tokenId, eventTime, now) {
+    const market = record?.market;
+    if (!market || record.marketStatus !== 'OPEN') return false;
+    const start = Number(market.start);
+    const end = Number(market.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end) ||
+        eventTime < start || eventTime > now + 250 || eventTime >= end ||
+        now - eventTime < 0 || now - eventTime > config.CROSS_PAIR_MAX_QUOTE_AGE_MS) return false;
+    if (String(market.tokens?.[side] || '') !== String(tokenId)) return false;
+    const previousAt = Number(record.quotes?.[side]?.updatedAt);
+    return !Number.isFinite(previousAt) || eventTime >= previousAt;
+  }
+
   handleMarketMessage(message) {
     if (Array.isArray(message)) {
       for (const item of message) this.handleMarketMessage(item);
@@ -545,13 +579,17 @@ class DipBounceBot {
     }
     if (!message || typeof message !== 'object') return;
     const type = String(message.event_type || message.eventType || '').toLowerCase();
-    const eventTime = normalizeTimestamp(message.timestamp, this.now());
+    const now = this.now();
+    const eventTime = normalizeTimestamp(message.timestamp, null);
+    if (!Number.isFinite(Number(eventTime))) return;
     const apply = (change) => {
       const tokenId = String(change?.asset_id || change?.assetId || message.asset_id || message.assetId || '');
       const ref = this.tokenRefs.get(tokenId);
       if (!ref) return;
       const record = this.records.get(ref.recordKey);
       if (!record) return;
+      if (!this.bookSnapshotTokens.has(tokenId) ||
+          !this.marketEventIsCurrent(record, ref.side, tokenId, eventTime, now)) return;
       const book = record.books[ref.side];
       const side = String(change?.side || '').toUpperCase();
       if (side === 'BUY' || side === 'SELL') {
@@ -574,11 +612,13 @@ class DipBounceBot {
     if (type === 'book') {
       const ref = this.tokenRefs.get(String(message.asset_id || message.assetId || ''));
       const record = ref && this.records.get(ref.recordKey);
-      if (!record) return;
+      const tokenId = String(message.asset_id || message.assetId || '');
+      if (!record || !this.marketEventIsCurrent(record, ref.side, tokenId, eventTime, now)) return;
       record.books[ref.side] = {
         bids: normalizedLevels(message.bids, true),
         asks: normalizedLevels(message.asks, false),
       };
+      this.bookSnapshotTokens.add(tokenId);
       this.applyBook(record, ref.side, record.books[ref.side], eventTime);
     } else if (type === 'price_change' || type === 'price_changes') {
       const changes = Array.isArray(message.price_changes) ? message.price_changes : [message];
@@ -589,7 +629,16 @@ class DipBounceBot {
 
   applyBook(record, side, book, updatedAt) {
     const sequence = ++this.marketUpdateSequence;
-    const quote = quoteFromBook(book, updatedAt, sequence);
+    const receivedAt = this.now();
+    const quote = {
+      ...quoteFromBook(book, updatedAt, sequence),
+      receivedAt,
+      tokenId: String(record.market?.tokens?.[side] || ''),
+      marketId: String(record.market?.id || record.market?.slug || ''),
+      marketSlug: record.market?.slug || null,
+      windowStart: Number.isFinite(Number(record.market?.start)) ? Number(record.market.start) : null,
+      windowEnd: Number.isFinite(Number(record.market?.end)) ? Number(record.market.end) : null,
+    };
     record.quotes[side] = quote;
     const state = record.sideStates[side];
     state.lastObservedMid = quote.mid;

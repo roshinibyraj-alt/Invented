@@ -52,7 +52,9 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented/);
-  assert.match(html, /Four independent cross-pair entries/);
+  assert.match(html, /Four cross-pairs/);
+  assert.match(html, /Entry proof/);
+  assert.match(html, /Performance, market detail, fill checks, and history/);
   assert.match(html, /BTC UP \+ ETH DOWN, ETH UP \+ BTC DOWN, BTC UP \+ ETH UP, and BTC DOWN \+ ETH DOWN/);
   assert.match(html, /Inverse-pair exits \+ ask-sum entries/);
   assert.match(html, /below \$0\.80/);
@@ -74,7 +76,8 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   assert.match(html, /orderList/);
   assert.match(html, /eventList/);
   assert.ok(html.indexOf('aria-label="Paper account summary"') < html.indexOf('id="positionsHeading"'));
-  assert.ok(html.indexOf('aria-label="Performance"') < html.indexOf('id="positionsHeading"'));
+  assert.ok(html.indexOf('id="positionsHeading"') < html.indexOf('aria-label="Performance"'));
+  assert.match(html, /id="feedStatus"/);
   assert.ok(html.indexOf('aria-label="Market activity"') > html.indexOf('aria-labelledby="strategyHeading"'));
   assert.ok(html.indexOf('aria-label="Market activity"') < html.indexOf('<footer>'));
 });
