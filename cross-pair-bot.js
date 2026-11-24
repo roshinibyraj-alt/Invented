@@ -1207,11 +1207,11 @@ class CrossPairBot extends DipBounceBot {
     state.strategy = {
       ...STRATEGY,
       entry: 'Monitor all four BTC/ETH UP/DOWN combinations independently. Enter a pair when its fresh best asks sum to strictly less than $0.80; one entry per pair per 5-minute window.',
-      fill: 'Paper taker sweep of fresh visible asks up to $0.99. The same displayed ask liquidity cannot be reused by another simulated entry until a new book update arrives; actual filled quantity, average entry, and fees are recorded.',
+      fill: STRATEGY.entryFillAssumption,
       quoteIntegrity: `Reject out-of-order or pre-window book updates. Entries require matching current token/market IDs, quotes no older than ${QUOTE_MAX_AGE_MS} ms, and pair-leg quote timestamps within ${QUOTE_SKEW_MAX_MS} ms.`,
       executionAudit: 'Each simulated entry stores the exact source book snapshot, quote timestamps, available ask depth, simulated fills, fees, and VWAP for later review.',
       sizing: STRATEGY.sizing,
-      inverseExit: `If a pair's own combined asks reach $${INVERSE_EXIT_ASK_SUM_THRESHOLD.toFixed(2)}, sell its remaining shares against visible bids. Its inverse pair is not forced to sell and can enter only when its own combined asks are below $${ASK_SUM_THRESHOLD.toFixed(2)}.`,
+      inverseExit: `If a pair's own combined asks rise strictly above $${INVERSE_EXIT_ASK_SUM_THRESHOLD.toFixed(2)}, sell its remaining shares against visible bids. Its inverse pair is not forced to sell and can enter only when its own combined asks are below $${ASK_SUM_THRESHOLD.toFixed(2)}.`,
       takeProfit: `When a side's best bid reaches $${TAKE_PROFIT_BID.toFixed(2)}, model a $${TAKE_PROFIT_PAYOUT.toFixed(2)} payout per remaining share.`,
       stopLoss: 'A fresh empty best-bid book triggers the $0.00 stop-loss for that side.',
       settlement: `Any shares still open at window end move to official Polymarket resolution; the bot checks for an official result every ${config.DIP_BOUNCE_RESOLUTION_POLL_MS / 1000} seconds.`,
