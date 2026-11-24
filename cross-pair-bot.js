@@ -13,7 +13,7 @@ const TAKE_PROFIT_PAYOUT = config.DIP_BOUNCE_TAKE_PROFIT_PAYOUT;
 const QUOTE_MAX_AGE_MS = config.CROSS_PAIR_MAX_QUOTE_AGE_MS;
 const QUOTE_SKEW_MAX_MS = config.CROSS_PAIR_MAX_QUOTE_SKEW_MS;
 const AUDIT_LEVEL_LIMIT = config.CROSS_PAIR_AUDIT_LEVEL_LIMIT;
-const EXECUTION_MODEL = 'CLOB_VISIBLE_DEPTH_SHARED_PAPER_V2';
+const EXECUTION_MODEL = 'BEST_ASK_FULL_SIZE_PAPER_NO_DEPTH_V1';
 const CLOSED_POSITION_STATUSES = new Set([
   'TAKE_PROFIT',
   'STOP_LOSS',
@@ -61,9 +61,9 @@ const PAIRS = Object.freeze([
 ]);
 
 const STRATEGY = Object.freeze({
-  id: 'btc-eth-four-pair-inverse-exit-tpsl-paper',
+  id: 'btc-eth-four-pair-simple-best-ask-paper',
   name: 'BTC/ETH four-pair fixed-size paper strategy',
-  version: 'four-pairs-080-inverse-122-tp-099-empty-book-sl-000-v6-quote-audited',
+  version: 'four-pairs-below-080-above-122-no-ask-depth-v1',
   assets: ['BTC', 'ETH'],
   timeframes: ['5m'],
   sharesPerLeg: BASE_SHARES,
@@ -71,15 +71,17 @@ const STRATEGY = Object.freeze({
   orderType: 'TAKER',
   sweepCap: SWEEP_CAP,
   executionModel: EXECUTION_MODEL,
+  askDepthRequired: false,
+  entryFillAssumption: 'Full requested quantity at the current best ask, ignoring available ask depth. Simplified paper fills, not executable-liquidity proof.',
   maximumQuoteAgeMs: QUOTE_MAX_AGE_MS,
   maximumPairQuoteSkewMs: QUOTE_SKEW_MAX_MS,
   auditBookLevels: AUDIT_LEVEL_LIMIT,
   resolutionPollMs: config.DIP_BOUNCE_RESOLUTION_POLL_MS,
-  inverseExitAskSumAtOrAbove: INVERSE_EXIT_ASK_SUM_THRESHOLD,
+  inverseExitAskSumAbove: INVERSE_EXIT_ASK_SUM_THRESHOLD,
   takeProfitBid: TAKE_PROFIT_BID,
   takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
   stopLoss: 'Fresh empty best-bid book; settle remaining shares at $0.',
-  exit: 'Sell a pair when its own combined asks reach $1.22. The inverse pair enters only if its own asks are below $0.80. Also apply the $0.99 bid take-profit ($1/share) and empty-bid $0 stop; any remaining open shares go to official resolution at window end.',
+  exit: 'Sell a pair when its own combined asks are strictly above $1.22. The inverse pair enters only if its own asks are below $0.80. Also apply the unchanged $0.99 bid take-profit ($1/share) and empty-bid $0 stop; any remaining open shares go to official resolution at window end.',
   sizing: 'Always 100 shares per leg on every entry in all four cross-pairs. No size progression after wins or losses.',
   execution: 'PAPER ONLY',
 });
@@ -152,13 +154,10 @@ function quoteMetadataIsCurrentForLeg(leg, now) {
 
 function quoteIsCurrentForLeg(leg, now) {
   const quote = leg?.quote;
-  const asks = sortLevels(quote?.asks);
   return quoteMetadataIsCurrentForLeg(leg, now) &&
     quote.status === 'LIVE' &&
     Number.isFinite(Number(quote.bestAsk)) &&
-    Number(quote.bestAsk) > 0 && Number(quote.bestAsk) < 1 &&
-    asks.length > 0 &&
-    Math.abs(asks[0].price - Number(quote.bestAsk)) < 1e-8;
+    Number(quote.bestAsk) > 0 && Number(quote.bestAsk) < 1;
 }
 
 function executionAuditSnapshot(leg, now, availableAsks, fill) {
@@ -511,11 +510,11 @@ class CrossPairBot extends DipBounceBot {
         .filter(position => position?.status === 'OPEN' && Number(position.shares) > 1e-9);
       if (!activePositions.length) continue;
 
-      if (!cycle.reverseExitTriggeredAt && marketPair.askSum < INVERSE_EXIT_ASK_SUM_THRESHOLD) continue;
+      if (!cycle.reverseExitTriggeredAt && marketPair.askSum <= INVERSE_EXIT_ASK_SUM_THRESHOLD) continue;
       if (!cycle.reverseExitTriggeredAt) {
         cycle.reverseExitTriggeredAt = now;
         cycle.reverseExitAskSum = marketPair.askSum;
-        cycle.reverseExitReason = `Own combined asks reached $${marketPair.askSum.toFixed(3)} (threshold $${INVERSE_EXIT_ASK_SUM_THRESHOLD.toFixed(2)}).`;
+        cycle.reverseExitReason = `Own combined asks rose above $${INVERSE_EXIT_ASK_SUM_THRESHOLD.toFixed(2)} to $${marketPair.askSum.toFixed(3)}.`;
         cycle.reverseExitStatus = 'SELLING';
         changed = true;
         this.log(`${pair.label} inverse exit triggered at combined asks $${marketPair.askSum.toFixed(3)}; selling its remaining legs.`, {
@@ -793,12 +792,12 @@ class CrossPairBot extends DipBounceBot {
   buyCrossPair(pair, pairState, marketPair, sharesPerLeg, now) {
     const fills = marketPair.legs.map(leg => ({
       ...leg,
-      availableAsks: this.availableAskLevelsForQuote(leg.quote),
-      fill: sweepAsks(this.availableAskLevelsForQuote(leg.quote), sharesPerLeg, leg.market),
+      availableAsks: sortLevels(leg.quote.asks),
+      fill: sweepAsks([{ price: Number(leg.quote.bestAsk), size: sharesPerLeg }], sharesPerLeg, leg.market),
     }));
     if (fills.every(leg => leg.fill.filledShares <= 1e-9)) {
-      pairState.status = 'WAITING_FOR_VISIBLE_DEPTH';
-      pairState.lastReason = 'Displayed ask depth was already consumed by another simulated entry; waiting for a fresh book update.';
+      pairState.status = 'WAITING_FOR_VALID_PRICE_OR_FEES';
+      pairState.lastReason = 'Waiting for a valid best ask and fee schedule.';
       return false;
     }
     const totalDebit = fills.reduce(
@@ -810,7 +809,6 @@ class CrossPairBot extends DipBounceBot {
         `The two-leg taker sweep needs $${round(totalDebit).toFixed(2)}, more than available paper cash.`;
       return false;
     }
-    for (const leg of fills) this.consumeAskDepth(leg.quote, leg.fill.fills);
 
     const cycleNumber = this.crossPairCycles.filter(item =>
       item.pairId === pair.id && Number(item.windowStart) === Number(pairState.windowStart)).length + 1;
@@ -868,7 +866,7 @@ class CrossPairBot extends DipBounceBot {
         limitPrice: SWEEP_CAP,
         fills: leg.fill.fills,
         executionAudit: executionAuditSnapshot(leg, now, leg.availableAsks, leg.fill),
-        fillRule: `Immediate visible-ask sweep up to $${SWEEP_CAP.toFixed(2)}; any remainder is cancelled.`,
+        fillRule: 'Simplified paper assumption: full requested shares at the current best ask; ask depth is not checked. Modeled taker fees still apply.',
         positionId,
         positionIds: positionId ? [positionId] : [],
         createdAt: now,

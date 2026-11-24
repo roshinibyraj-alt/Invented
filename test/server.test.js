@@ -53,7 +53,7 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   assert.equal(response.status, 200);
   assert.match(html, /Invented/);
   assert.match(html, /Four cross-pairs/);
-  assert.match(html, /Entry proof/);
+  assert.match(html, /Paper entry assumption/);
   assert.match(html, /Performance, market detail, fill checks, and history/);
   assert.match(html, /BTC UP \+ ETH DOWN, ETH UP \+ BTC DOWN, BTC UP \+ ETH UP, and BTC DOWN \+ ETH DOWN/);
   assert.match(html, /Inverse-pair exits \+ ask-sum entries/);
@@ -61,7 +61,7 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   assert.match(html, /Always buy 100 shares on each leg/);
   assert.match(html, /regardless of previous wins or losses/);
   assert.match(html, /History is saved in persistent Railway storage/);
-  assert.match(html, /Paper taker sweeps are capped at \$0\.99/);
+  assert.match(html, /without checking ask depth/);
   assert.match(html, /Exit one pair without forcing its inverse to sell/);
   assert.match(html, /\$1 per remaining share/);
   assert.match(html, /empty fresh bid book counts as a \$0 stop/i);

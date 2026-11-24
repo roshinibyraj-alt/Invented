@@ -413,8 +413,8 @@
         <div class="strategy-steps">
           <div class="strategy-step"><span class="step-num">1</span><div><strong>Evaluate all four combinations independently</strong><span>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN can each trigger in the same 5-minute window.</span></div></div>
           <div class="strategy-step"><span class="step-num">2</span><div><strong>Enter when combined best asks are below $0.80</strong><span>Each pair has one entry per window. Both current best asks must be fresh, and their sum must be strictly below $0.80.</span></div></div>
-          <div class="strategy-step"><span class="step-num">3</span><div><strong>Always buy 100 shares on each leg</strong><span>Every qualifying entry stays flat at 100 requested shares per leg, regardless of previous wins or losses. Paper taker sweeps are capped at $0.99.</span></div></div>
-          <div class="strategy-step"><span class="step-num">4</span><div><strong>Exit one pair without forcing its inverse to sell</strong><span>If this pair’s own combined asks reach $1.22, sell its remaining shares against visible bids. Its inverse enters only when its own fresh asks are below $0.80.</span></div></div>
+          <div class="strategy-step"><span class="step-num">3</span><div><strong>Always buy 100 shares on each leg</strong><span>Paper entries assume all 100 shares fill at the current best ask, regardless of previous wins or losses, without checking ask depth. Taker fees are modeled. These simplified fills do not prove real liquidity.</span></div></div>
+          <div class="strategy-step"><span class="step-num">4</span><div><strong>Exit one pair without forcing its inverse to sell</strong><span>If this pair’s own combined asks rise strictly above $1.22, sell its remaining shares against visible bids. Its inverse enters only when its own fresh asks are below $0.80.</span></div></div>
           <div class="strategy-step"><span class="step-num">5</span><div><strong>Keep the previous take-profit, stop, and resolution rules</strong><span>At a $0.99 best bid, count $1 per remaining share. An empty fresh bid book counts as a $0 stop. Any shares still open at window end go to official resolution.</span></div></div>
         </div>
         <div class="strategy-meta">
@@ -618,11 +618,11 @@
           .map(fill => `${shares(fill.shares)} @ ${money(fill.price, 3)}`)
           .join(' · ') || 'No simulated fills';
         return `<details class="fill-audit">
-          <summary>Entry proof · ask ${money(audit.bestAsk, 3)} · quote age ${safe(sourceAge)}</summary>
+          <summary>Paper entry assumption · ask ${money(audit.bestAsk, 3)} · quote age ${safe(sourceAge)}</summary>
           <div class="fill-audit-content">
             <span>Market ${safe(label(audit.marketSlug, audit.marketId))} · token ${safe(label(audit.tokenId))}</span>
             <span>Book at entry: ${safe(asks)}</span>
-            <span>Available depth used by simulation: ${safe(available)}</span>
+            <span>Ask depth ignored. Full-size fills at best ask are assumed, not verified against available liquidity.</span>
             <span>Fill: ${safe(fills)} · VWAP ${money(audit.averageFillPrice, 4)} · fees ${money(audit.totalEntryFees, 4)}</span>
           </div>
         </details>`;

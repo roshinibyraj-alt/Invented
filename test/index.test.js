@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { restoreOrResetLedger } = require('../index');
+const CrossPairBot = require('../cross-pair-bot');
 
 function makeStubBot() {
   const calls = { restored: 0, flushed: 0, logs: [] };
@@ -44,4 +45,23 @@ test('startup clears old strategy history and flushes a fresh ledger', async () 
   assert.equal(bot.calls.restored, 0);
   assert.equal(bot.calls.flushed, 1);
   assert.equal(bot.calls.logs[0].details.type, 'LEDGER_RESET');
+});
+
+test('the simplified execution model resets the previous four-pair paper ledger', async () => {
+  const bot = new CrossPairBot();
+  const status = await restoreOrResetLedger(bot, {
+    snapshot: {
+      strategy: { id: 'btc-eth-four-pair-inverse-exit-tpsl-paper' },
+      positions: [{ id: 'old-position' }],
+      account: { cash: 5298 },
+    },
+  }, CrossPairBot.STRATEGY.id);
+  assert.equal(status, 'reset');
+  assert.equal(bot.positions.length, 0);
+  assert.equal(bot.orders.length, 0);
+  assert.equal(bot.crossPairCycles.length, 0);
+  assert.equal(bot.cash, require('../config').DEMO_CAPITAL);
+  const saved = bot.exportLedger();
+  const nextBot = new CrossPairBot();
+  assert.equal(await restoreOrResetLedger(nextBot, saved, CrossPairBot.STRATEGY.id), 'restored');
 });

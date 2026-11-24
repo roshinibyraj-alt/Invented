@@ -128,7 +128,7 @@ test('entry rejects stale, wrong-market, mismatched-book, and widely skewed quot
     btcUp: 0.35, btcDown: 0.40, ethUp: 0.38, ethDown: 0.44,
   }, getNow());
   bot.records.get('BTC:5m').quotes.UP.asks[0].price = 0.20;
-  assert.equal(bot.pairQuotes(pair, getNow()).asksFresh, false);
+  assert.equal(bot.pairQuotes(pair, getNow()).asksFresh, true, 'ask-depth arrays do not gate a valid best ask');
 });
 
 test('audit records a valid one-cent source ask and its exact simulated fill', () => {
@@ -158,12 +158,12 @@ test('audit records a valid one-cent source ask and its exact simulated fill', (
   ]);
 });
 
-test('visible ask depth is not reused by multiple pairs on the same book update', () => {
+test('all qualifying pairs assume full best-ask fills even with missing or shallow ask depth', () => {
   const { bot, getNow } = createBot();
   for (const record of bot.records.values()) {
     for (const side of ['UP', 'DOWN']) {
-      record.quotes[side].asks = [{ price: record.quotes[side].bestAsk, size: 100 }];
-      record.quotes[side].askSize = 100;
+      record.quotes[side].asks = side === 'UP' ? [] : [{ price: record.quotes[side].bestAsk, size: 1 }];
+      record.quotes[side].askSize = side === 'UP' ? 0 : 1;
     }
   }
   bot.evaluateCrossPairs(getNow());
@@ -173,8 +173,11 @@ test('visible ask depth is not reused by multiple pairs on the same book update'
     const key = `${position.marketId}:${position.side}`;
     consumedByToken.set(key, (consumedByToken.get(key) || 0) + position.initialShares);
   }
-  assert.ok([...consumedByToken.values()].every(shares => shares <= 100));
-  assert.equal(bot.pairWindowStates['btc-up-eth-up'].status, 'WAITING_FOR_VISIBLE_DEPTH');
+  assert.ok([...consumedByToken.values()].some(shares => shares === 200));
+  assert.equal(bot.positions.length, 6);
+  assert.ok(bot.positions.every(position => position.initialShares === 100));
+  assert.equal(bot.snapshot().strategy.askDepthRequired, false);
+  assert.equal(bot.snapshot().strategy.executionModel, 'BEST_ASK_FULL_SIZE_PAPER_NO_DEPTH_V1');
 });
 
 test('all pair sizes stay at 100 after wins or losses', () => {
@@ -321,7 +324,11 @@ test('a pair exits only at its own $1.22 ask sum, then its inverse enters only b
   setQuote('BTC', 'DOWN', 0.38, 0.37, now);
   bot.evaluateCrossPairs(now);
 
-  assert.equal(firstPair.reverseExitAskSum, 1.22);
+  assert.equal(firstPair.reverseExitTriggeredAt, null, 'exactly $1.22 must not sell');
+  now += 100;
+  setQuote('BTC', 'UP', 0.63, 0.61, now);
+  bot.evaluateCrossPairs(now);
+  assert.equal(firstPair.reverseExitAskSum, 1.23);
   assert.equal(firstPair.reverseExitStatus, 'SOLD');
   assert.equal(firstPair.legPositionIds.every(id =>
     bot.positions.find(position => position.id === id)?.status === 'PAIR_REVERSE_EXIT'), true);
@@ -334,7 +341,7 @@ test('a pair exits only at its own $1.22 ask sum, then its inverse enters only b
   assert.equal(inverseCycle.entryAskSum, 0.77);
   assert.ok(inverseCycle.legPositionIds.every(id =>
     bot.positions.find(position => position.id === id)?.status === 'OPEN'));
-  assert.equal(bot.snapshot().strategy.inverseExitAskSumAtOrAbove, 1.22);
+  assert.equal(bot.snapshot().strategy.inverseExitAskSumAbove, 1.22);
 });
 
 test('the inverse pair does not enter when its own combined asks are not below $0.80', () => {
@@ -360,7 +367,7 @@ test('the inverse pair does not enter when its own combined asks are not below $
     quote.bids = [{ price: bid, size: 2000 }];
   };
   now += 500;
-  setQuote('BTC', 'UP', 0.62, 0.61, now);
+  setQuote('BTC', 'UP', 0.63, 0.61, now);
   setQuote('ETH', 'DOWN', 0.60, 0.59, now);
   setQuote('ETH', 'UP', 0.45, 0.44, now);
   setQuote('BTC', 'DOWN', 0.40, 0.39, now);
@@ -396,7 +403,7 @@ test('inverse exits sell visible bid depth and account for a later partial-fill 
     quote.bids = [{ price: bid, size }];
   };
   now += 500;
-  setQuote('BTC', 'UP', 0.62, 0.61, 50, now);
+  setQuote('BTC', 'UP', 0.63, 0.61, 50, now);
   setQuote('ETH', 'DOWN', 0.60, 0.59, 2000, now);
   setQuote('ETH', 'UP', 0.39, 0.38, 2000, now);
   setQuote('BTC', 'DOWN', 0.38, 0.37, 2000, now);
