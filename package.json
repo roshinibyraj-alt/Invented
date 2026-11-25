@@ -1,8 +1,8 @@
 {
-  "name": "invented-independent-rung-paper-bot",
+  "name": "invented-freqai-btc-5m-paper-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Paper-only independent BTC/ETH UP/DOWN limit ladders with depth-backed fills.",
+  "description": "Paper-only BTC 5-minute direction bot using Freqtrade FreqAI and Binance spot data.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",

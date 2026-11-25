@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#091326">
+  <title>Invented — BTC FreqAI Paper Bot</title>
+  <style>
+    :root{color-scheme:dark;--bg:#091326;--panel:#111f38;--panel2:#172846;--line:#263b5e;--text:#f4f7ff;--muted:#a4b4cf;--green:#39e0a1;--red:#ff7188;--blue:#62a8ff;--yellow:#ffd36b;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% 0,#193662 0,transparent 36%),var(--bg);color:var(--text);font:15px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
+    .wrap{max-width:1020px;margin:0 auto;padding:14px 12px 40px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:3px 0 14px}.brand{display:flex;align-items:center;gap:10px}.logo{display:grid;place-items:center;width:42px;height:42px;border-radius:14px;background:linear-gradient(140deg,#40dcb1,#4b89ff);font-size:22px;font-weight:950;color:#081426}.brand strong{display:block;font-size:20px;letter-spacing:-.04em}.brand small,.muted{color:var(--muted)}.brand small{font-size:12px}
+    .badge{padding:7px 11px;border-radius:999px;background:#193a47;color:var(--green);font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;border:1px solid #286052}.badge.warn{background:#42371d;color:var(--yellow);border-color:#77602c}.badge.bad{background:#482334;color:var(--red);border-color:#754052}
+    .grid{display:grid;gap:12px}.panel{background:linear-gradient(145deg,rgba(23,40,70,.96),rgba(15,29,51,.98));border:1px solid var(--line);border-radius:20px;padding:15px;box-shadow:0 15px 35px #0002}.label{font-size:11px;color:var(--muted);font-weight:850;letter-spacing:.1em;text-transform:uppercase}.equity{background:linear-gradient(135deg,#182b4c,#111d34 70%);border-color:#385584;padding:18px}.money{font:850 clamp(34px,10vw,54px)/1.05 var(--mono);letter-spacing:-.055em;margin-top:5px}.pnl{font:800 20px var(--mono)}.positive{color:var(--green)}.negative{color:var(--red)}.neutral{color:var(--yellow)}.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:15px}.stat{background:#07132666;border:1px solid #263c5c;border-radius:13px;padding:10px}.stat strong{display:block;font:750 18px var(--mono);margin-top:3px;overflow-wrap:anywhere}
+    .section-title{display:flex;justify-content:space-between;align-items:end;gap:10px;margin:23px 2px 10px}.section-title h2{font-size:22px;line-height:1.1;margin:0;letter-spacing:-.04em}.section-title span{font-size:12px;color:var(--muted);text-align:right}.model{border-color:#385584}.model-head{display:flex;justify-content:space-between;gap:10px;align-items:center}.model-name{font-weight:850;font-size:18px}.model-note{font-size:12px;color:var(--muted);margin-top:4px}.probs{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:14px}.prob{padding:14px 12px;border-radius:16px;border:1px solid var(--line);background:#0b1830}.prob.up{border-color:#197b63;background:linear-gradient(145deg,#0d322f,#10233c)}.prob.down{border-color:#8d3e58;background:linear-gradient(145deg,#361c34,#12213a)}.prob span{font-size:12px;font-weight:900;letter-spacing:.09em}.prob strong{display:block;font:900 clamp(29px,9vw,42px)/1.1 var(--mono);margin-top:4px}.bar{height:10px;background:#060f1e;border-radius:20px;overflow:hidden;margin-top:12px}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--green),var(--blue));border-radius:20px;transition:width .5s}
+    .window-head{display:flex;align-items:start;justify-content:space-between;gap:10px}.window-head h2{margin:0;font-size:21px}.clock{font:850 27px var(--mono);color:var(--yellow);white-space:nowrap}.window-meta{font-size:12px;color:var(--muted);margin-top:4px}.quotes{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:13px}.quote{padding:12px;border:1px solid var(--line);background:#09162b;border-radius:14px}.quote.up{border-left:4px solid var(--green)}.quote.down{border-left:4px solid var(--red)}.quote-head{display:flex;justify-content:space-between;align-items:center;font-weight:900;letter-spacing:.06em}.quote-prices{display:flex;justify-content:space-between;gap:6px;margin-top:8px}.quote-prices div{font-size:11px;color:var(--muted)}.quote-prices b{display:block;font:800 23px var(--mono);color:var(--text)}
+    .position{display:grid;grid-template-columns:1fr auto;gap:8px;background:#0a1730;border:1px solid var(--line);border-radius:15px;padding:13px;margin-top:12px}.position h3{margin:0 0 4px;font-size:16px}.position .details{font-size:12px;color:var(--muted)}.position .value{text-align:right;font:850 21px var(--mono)}.position .value small{display:block;color:var(--muted);font:750 10px var(--sans);text-transform:uppercase}.sideTag{display:inline-block;border-radius:7px;padding:3px 7px;font-size:11px;font-weight:900}.sideTag.UP{background:#12644f;color:#adffe2}.sideTag.DOWN{background:#6a2d47;color:#ffd0dc}
+    .list{display:grid;gap:8px}.row{background:#0a1730;border-radius:14px;padding:11px;border-left:4px solid var(--line);display:grid;grid-template-columns:1fr auto;gap:5px 8px}.row.win{border-color:var(--green)}.row.loss{border-color:var(--red)}.row.pending{border-color:var(--blue)}.row-title{font-weight:850}.row-detail{font-size:12px;color:var(--muted);overflow-wrap:anywhere}.row-pnl{grid-column:2;grid-row:1/3;align-self:center;text-align:right;font:800 18px var(--mono)}.empty{border:1px dashed #385070;border-radius:14px;padding:14px;text-align:center;color:var(--muted);font-size:13px}
+    .events{display:grid;gap:0}.event{padding:9px 0;border-bottom:1px solid #233653}.event:last-child{border:0}.event time{color:var(--muted);font:700 11px var(--mono)}.event b{display:block;font-size:11px;color:var(--blue);text-transform:uppercase;letter-spacing:.07em}.event p{margin:2px 0 0;overflow-wrap:anywhere}
+    .strategy{margin-top:24px;background:linear-gradient(135deg,#162846,#252044);border:1px solid #485181;border-radius:20px;padding:16px}.strategy h2{margin:0 0 8px;font-size:21px}.strategy p{color:#d5dff1;margin:7px 0;font-size:13px}.footer{text-align:center;color:var(--muted);font-size:11px;margin-top:16px}
+    @media(min-width:700px){.wrap{padding:24px 20px 50px}.stats{grid-template-columns:repeat(4,1fr)}.two{grid-template-columns:1.1fr .9fr}.model{padding:20px}.quotes{gap:12px}.panel{padding:18px}}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <header class="top">
+    <div class="brand"><div class="logo">I</div><div><strong>Invented</strong><small>BTC 5-minute FreqAI paper bot</small></div></div>
+    <span class="badge warn" id="status">CONNECTING</span>
+  </header>
+  <section class="panel equity">
+    <div class="label">Paper account equity</div><div class="money" id="equity">—</div>
+    <div class="pnl" id="totalPnl">—</div>
+    <div class="stats">
+      <div class="stat"><span class="label">Available cash</span><strong id="cash">—</strong></div>
+      <div class="stat"><span class="label">Open P&amp;L</span><strong id="openPnl">—</strong></div>
+      <div class="stat"><span class="label">Win rate</span><strong id="winRate">—</strong></div>
+      <div class="stat"><span class="label">Trades / fees</span><strong id="tradesFees">—</strong></div>
+    </div>
+  </section>
+  <div class="section-title"><h2>Model forecast</h2><span>BTC spot inputs · 1-minute updates</span></div>
+  <section class="panel model">
+    <div class="model-head"><div><div class="model-name">Freqtrade FreqAI · LightGBM</div><div class="model-note" id="modelNote">Waiting for model startup…</div></div><span class="badge warn" id="modelStatus">WARMING</span></div>
+    <div class="probs">
+      <div class="prob up"><span>UP PROBABILITY</span><strong id="pUp">—</strong></div>
+      <div class="prob down"><span>DOWN PROBABILITY</span><strong id="pDown">—</strong></div>
+    </div>
+    <div class="bar"><i id="probBar" style="width:50%"></i></div>
+    <div class="model-note" id="modelDecision">One 10-share paper entry is attempted per window when live feeds and book liquidity are available.</div>
+  </section>
+  <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
+  <section class="panel">
+    <div class="window-head"><div><h2>Bitcoin Up or Down · 5m</h2><div class="window-meta" id="windowMeta">Waiting for current market…</div></div><div class="clock" id="clock">—</div></div>
+    <div class="quotes" id="quotes"><div class="empty">Waiting for current Polymarket book.</div></div>
+    <div id="position"><div class="empty">No entry in this window yet.</div></div>
+  </section>
+  <section class="grid two">
+    <article>
+      <div class="section-title"><h2>Pending resolution</h2><span id="pendingCount">0</span></div>
+      <div class="list" id="pending"><div class="empty">No positions pending.</div></div>
+    </article>
+    <article>
+      <div class="section-title"><h2>Closed trades</h2><span id="closedCount">0</span></div>
+      <div class="list" id="closed"><div class="empty">No resolved trades yet.</div></div>
+    </article>
+  </section>
+  <section class="panel" style="margin-top:18px">
+    <div class="model-head"><div class="model-name">Recent activity</div><span class="muted" id="socket">—</span></div>
+    <div class="events" id="events"><div class="empty">Waiting for activity.</div></div>
+  </section>
+  <section class="strategy">
+    <div class="label">Strategy details</div>
+    <h2>One BTC prediction and one paper entry per 5-minute window</h2>
+    <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Labels are the direction of the enclosing 5-minute BTC candle at its close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
+    <p>After the first minute can close, the bot chooses whichever class has the higher predicted probability. There is no minimum-confidence or edge gate, so a low-confidence forecast still selects a side. If no current-window model prediction exists by 80 seconds, a fresh Binance window-direction fallback is used and shown in activity.</p>
+    <p>The paper bot sweeps visible Polymarket asks up to $1.00 for 10 shares, records partial fills and modeled taker fees, and holds the position until official resolution. Freqtrade runs in dry mode only as the predictor; it never sends orders. Missing/stale feeds or a missing executable book can still prevent an entry.</p>
+    <p class="muted" id="ledger">Paper ledger —</p>
+  </section>
+  <div class="footer">Paper simulation only · no live orders · Binance is the prediction data source</div>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const esc = x => String(x ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const num = x => x !== null && x !== undefined && Number.isFinite(Number(x));
+  const money = x => num(x) ? (Number(x)<0?'-$':'$')+Math.abs(Number(x)).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
+  const signed = x => num(x) ? (Number(x)>0?'+':'')+money(x) : '—';
+  const px = x => num(x)?'$'+Number(x).toFixed(3):'—';
+  const shares = x => num(x)?Number(x).toLocaleString(undefined,{maximumFractionDigits:2}):'—';
+  const date = x => {if(!num(x))return null;let n=Number(x);if(n<1e12)n*=1000;return new Date(n)};
+  const time = x => {const d=date(x);return d?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—'};
+  const cls = x => !num(x)?'':Number(x)>0?'positive':Number(x)<0?'negative':'neutral';
+  const countdown = x => {if(!num(x))return'—';const s=Math.max(0,Math.floor(Number(x)));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
+  function positionCard(p){
+    const pnl=Number(p.unrealizedPnl)||0;
+    return `<div class="position"><div><h3><span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${shares(p.shares)} shares</h3><div class="details">Average entry ${px(p.entryPrice)} · cost ${money(p.totalCost)} · fee ${money(p.fees)}<br>Signal: ${esc(p.signalSource||'—')} ${num(p.modelProbabilityUp)?`· UP ${(p.modelProbabilityUp*100).toFixed(1)}% / DOWN ${(p.modelProbabilityDown*100).toFixed(1)}%`:''}</div></div><div class="value ${cls(pnl)}">${signed(pnl)}<small>floating P&amp;L</small></div></div>`;
+  }
+  function row(p,pending=false){
+    const val=pending?'At risk '+money(p.totalCost):signed(p.realizedPnl);
+    const outcome=pending?'Pending resolution':p.status==='RESOLVED_WIN'?'WIN':p.status==='RESOLVED_LOSS'?'LOSS':p.status;
+    return `<div class="row ${pending?'pending':Number(p.realizedPnl)>0?'win':Number(p.realizedPnl)<0?'loss':''}"><div class="row-title">${esc(p.asset)} <span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${outcome}</div><div class="row-detail">${time(p.windowStart)} · ${shares(p.originalShares||p.shares)} shares · in ${px(p.entryPrice)} · cost ${money(p.totalCost)}${pending?'':` · out ${px(p.exitPrice)} · ${time(p.exitAt)}`}</div><div class="row-pnl ${pending?'':cls(p.realizedPnl)}">${val}</div></div>`;
+  }
+  function render(s){
+    const a=s.account||{}, f=s.freqai||{}, market=(s.markets||[]).find(m=>m.asset==='BTC'&&m.timeframe==='5m');
+    $('equity').textContent=money(a.equity);
+    const total=num(a.equity)&&num(a.initialCapital)?Number(a.equity)-Number(a.initialCapital):null;
+    $('totalPnl').textContent=signed(total);$('totalPnl').className='pnl '+cls(total);
+    $('cash').textContent=money(a.availableCash??a.cash);$('openPnl').textContent=signed(a.unrealizedPnl);$('openPnl').className=cls(a.unrealizedPnl);
+    $('winRate').textContent=num(a.winRate)?Number(a.winRate).toFixed(1)+'%': '—';
+    $('tradesFees').textContent=`${Number(a.settledPositions||0)+Number(a.openPositions||0)} · ${money(a.totalFees)}`;
+    const p=f.prediction, d=s.currentDecision;
+    $('modelStatus').textContent=String(f.status||'WAITING').replace(/_/g,' ');
+    $('modelStatus').className='badge '+(f.status==='READY'?'':'warn');
+    $('modelNote').textContent=f.lastError?`Model worker: ${f.lastError}`:(p?`Current-window score from ${esc(p.model||'FreqAI')} · candle ${time(p.candleStart)}`:'FreqAI is training or waiting for its next 1-minute candle.');
+    const display=p||(d?.source==='FREQAI'?d:null);
+    if(display&&num(display.pUp)&&num(display.pDown)){
+      $('pUp').textContent=(Number(display.pUp)*100).toFixed(1)+'%';$('pDown').textContent=(Number(display.pDown)*100).toFixed(1)+'%';$('probBar').style.width=(Number(display.pUp)*100).toFixed(1)+'%';
+    }else{$('pUp').textContent='—';$('pDown').textContent='—';$('probBar').style.width='50%'}
+    $('modelDecision').textContent=d?(d.source==='FREQAI'?`Selected ${d.side} from FreqAI at ${time(d.at)}; ${(d.pUp*100).toFixed(1)}% UP / ${(d.pDown*100).toFixed(1)}% DOWN. No confidence gate.`:`Selected ${d.side} from fresh Binance window direction at ${time(d.at)}; no model probability was available.`):'Entry waits until the first minute has formed; one trade maximum per window.';
+    if(market){
+      $('windowTitle').textContent=market.marketStatus||'—';$('windowMeta').textContent=`${time(market.start)} – ${time(market.end)} · ${esc(market.marketStatus||'')}`;$('clock').textContent=countdown(market.secondsRemaining);
+      $('quotes').innerHTML=['UP','DOWN'].map(side=>{const q=market.sideStates?.[side]||{};return `<div class="quote ${side.toLowerCase()}"><div class="quote-head"><span>${side}</span><span class="muted">${q.fresh?'LIVE':'STALE'}</span></div><div class="quote-prices"><div>BEST BID<b>${px(q.bestBid)}</b></div><div>BEST ASK<b>${px(q.bestAsk)}</b></div><div>MID<b>${px(q.mid)}</b></div></div></div>`}).join('');
+      const position=(s.positions||[]).find(x=>x.status==='OPEN'&&String(x.windowStart)===String(market.start));
+      const state=market.sideStates?.[market.triggeredSide]||null;
+      $('position').innerHTML=position?positionCard(position):`<div class="empty">${esc(state?.reason||'No entry in this window yet.')} · ${esc(state?.orderStatus||'WAITING')}</div>`;
+    }else{$('windowTitle').textContent='Searching';$('windowMeta').textContent='No active BTC 5-minute market found.';$('clock').textContent='—';$('quotes').innerHTML='<div class="empty">Waiting for current Polymarket book.</div>';$('position').innerHTML='<div class="empty">No active window.</div>'}
+    const pos=s.positions||[];
+    const pending=pos.filter(x=>x.status==='PENDING_RESOLUTION');
+    const closed=pos.filter(x=>['RESOLVED_WIN','RESOLVED_LOSS'].includes(x.status)).sort((x,y)=>Number(y.resolvedAt||0)-Number(x.resolvedAt||0));
+    $('pendingCount').textContent=pending.length;$('pending').innerHTML=pending.length?pending.slice(0,10).map(x=>row(x,true)).join(''):'<div class="empty">No positions pending.</div>';
+    $('closedCount').textContent=closed.length;$('closed').innerHTML=closed.length?closed.slice(0,10).map(x=>row(x)).join(''):'<div class="empty">No resolved trades yet.</div>';
+    $('events').innerHTML=(s.events||[]).slice(0,8).map(e=>`<div class="event"><time>${time(e.time)}</time><b>${esc(e.type||'Activity')}</b><p>${esc(e.message||'')}</p></div>`).join('')||'<div class="empty">No recent activity.</div>';
+    const ws=s.websocket||{};$('socket').textContent=`CLOB ${ws.status||'—'} · ${time(s.now)}`;
+    const lp=s.ledgerPersistence||{};$('ledger').textContent='Paper ledger '+(lp.error?`save error: ${lp.error}`:lp.enabled?`saved ${time(lp.lastSavedAt)}`:'not persistent');
+    $('status').textContent=s.status||'—';$('status').className='badge '+(/ERROR|BLOCKED/i.test(s.status||'')?'bad':s.status==='RUNNING'?'':'warn');
+  }
+  let busy=false;
+  async function poll(){
+    if(busy)return;busy=true;
+    try{const r=await fetch('/api/state',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);render(await r.json())}
+    catch(e){$('status').textContent='OFFLINE';$('status').className='badge bad';$('modelNote').textContent='Dashboard state unavailable; retrying.'}
+    finally{busy=false;setTimeout(poll,1000)}
+  }
+  poll();
+})();
+</script>
+</body>
+</html>
