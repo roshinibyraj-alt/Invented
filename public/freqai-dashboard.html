@@ -44,7 +44,8 @@
       <div class="prob down"><span>DOWN PROBABILITY</span><strong id="pDown">—</strong></div>
     </div>
     <div class="bar"><i id="probBar" style="width:50%"></i></div>
-    <div class="model-note" id="modelDecision">One 10-share paper entry is attempted per window when live feeds and book liquidity are available.</div>
+    <div class="model-note" id="modelDecision">50-share initial buy; flip only on an opposite FreqAI probability above 60%.</div>
+    <div class="model-note" id="recovery">Window recovery deficit: $0.00 · resets each new window</div>
   </section>
   <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
   <section class="panel">
@@ -68,10 +69,11 @@
   </section>
   <section class="strategy">
     <div class="label">Strategy details</div>
-    <h2>One BTC prediction and one paper entry per 5-minute window</h2>
+    <h2>BTC model signals with window-only recovery flips</h2>
     <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Labels are the direction of the enclosing 5-minute BTC candle at its close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
     <p>After the first minute can close, the bot chooses whichever class has the higher predicted probability. There is no minimum-confidence or edge gate, so a low-confidence forecast still selects a side. If no current-window model prediction exists by 80 seconds, a fresh Binance window-direction fallback is used and shown in activity.</p>
-    <p>The paper bot sweeps visible Polymarket asks up to $1.00 for 10 shares, records partial fills and modeled taker fees, and holds the position until official resolution. Freqtrade runs in dry mode only as the predictor; it never sends orders. Missing/stale feeds or a missing executable book can still prevent an entry.</p>
+    <p>Start each window with a 50-share paper buy. If the opposite side's fresh FreqAI probability is strictly above 60%, sell the held position against visible bids down to $0.01. Once sold, buy the opposite side, with at least 50 shares, sized so a $1 winning payout could recover this window's net realized losses and fees. No same-side adding.</p>
+    <p>Buys sweep visible asks up to $1.00. Sell and buy fees are included. Partial sells wait for fresh liquidity before a replacement buy; insufficient depth or cash can delay a recovery buy. Remaining shares hold to official resolution, with no TP or SL. Recovery resets at each new window and is not guaranteed. Freqtrade is prediction-only in dry mode; no live orders are sent.</p>
     <p class="muted" id="ledger">Paper ledger —</p>
   </section>
   <div class="footer">Paper simulation only · no live orders · Binance is the prediction data source</div>
@@ -95,7 +97,7 @@
   }
   function row(p,pending=false){
     const val=pending?'At risk '+money(p.totalCost):signed(p.realizedPnl);
-    const outcome=pending?'Pending resolution':p.status==='RESOLVED_WIN'?'WIN':p.status==='RESOLVED_LOSS'?'LOSS':p.status;
+    const outcome=pending?'Pending resolution':p.status==='CLOSED_FLIP'?'FLIP EXIT':p.status==='RESOLVED_WIN'?'WIN':p.status==='RESOLVED_LOSS'?'LOSS':p.status;
     return `<div class="row ${pending?'pending':Number(p.realizedPnl)>0?'win':Number(p.realizedPnl)<0?'loss':''}"><div class="row-title">${esc(p.asset)} <span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${outcome}</div><div class="row-detail">${time(p.windowStart)} · ${shares(p.originalShares||p.shares)} shares · in ${px(p.entryPrice)} · cost ${money(p.totalCost)}${pending?'':` · out ${px(p.exitPrice)} · ${time(p.exitAt)}`}</div><div class="row-pnl ${pending?'':cls(p.realizedPnl)}">${val}</div></div>`;
   }
   function render(s){
@@ -107,6 +109,8 @@
     $('winRate').textContent=num(a.winRate)?Number(a.winRate).toFixed(1)+'%': '—';
     $('tradesFees').textContent=`${Number(a.settledPositions||0)+Number(a.openPositions||0)} · ${money(a.totalFees)}`;
     const p=f.prediction, d=s.currentDecision;
+    const recovery=s.recovery||{};
+    $('recovery').textContent=`Window realized P&L ${signed(recovery.windowRealizedPnl)} · recovery deficit ${money(recovery.deficit)} · resets each window`;
     $('modelStatus').textContent=String(f.status||'WAITING').replace(/_/g,' ');
     $('modelStatus').className='badge '+(f.status==='READY'?'':'warn');
     $('modelNote').textContent=f.lastError?`Model worker: ${f.lastError}`:(p?`Current-window score from ${esc(p.model||'FreqAI')} · candle ${time(p.candleStart)}`:'FreqAI is training or waiting for its next 1-minute candle.');
@@ -114,7 +118,7 @@
     if(display&&num(display.pUp)&&num(display.pDown)){
       $('pUp').textContent=(Number(display.pUp)*100).toFixed(1)+'%';$('pDown').textContent=(Number(display.pDown)*100).toFixed(1)+'%';$('probBar').style.width=(Number(display.pUp)*100).toFixed(1)+'%';
     }else{$('pUp').textContent='—';$('pDown').textContent='—';$('probBar').style.width='50%'}
-    $('modelDecision').textContent=d?(d.source==='FREQAI'?`Selected ${d.side} from FreqAI at ${time(d.at)}; ${(d.pUp*100).toFixed(1)}% UP / ${(d.pDown*100).toFixed(1)}% DOWN. No confidence gate.`:`Selected ${d.side} from fresh Binance window direction at ${time(d.at)}; no model probability was available.`):'Entry waits until the first minute has formed; one trade maximum per window.';
+    $('modelDecision').textContent=d?(d.source==='FREQAI'?`Last buy: ${d.side} at ${time(d.at)}; ${(d.pUp*100).toFixed(1)}% UP / ${(d.pDown*100).toFixed(1)}% DOWN. Opposite flips require above 60%.`:`Initial ${d.side} buy used fresh Binance direction at ${time(d.at)}; no model probability was available. Flips require a FreqAI score above 60%.`):'Initial buy: 50 shares after 80 seconds. Opposite flips require FreqAI above 60%.';
     if(market){
       $('windowTitle').textContent=market.marketStatus||'—';$('windowMeta').textContent=`${time(market.start)} – ${time(market.end)} · ${esc(market.marketStatus||'')}`;$('clock').textContent=countdown(market.secondsRemaining);
       $('quotes').innerHTML=['UP','DOWN'].map(side=>{const q=market.sideStates?.[side]||{};return `<div class="quote ${side.toLowerCase()}"><div class="quote-head"><span>${side}</span><span class="muted">${q.fresh?'LIVE':'STALE'}</span></div><div class="quote-prices"><div>BEST BID<b>${px(q.bestBid)}</b></div><div>BEST ASK<b>${px(q.bestAsk)}</b></div><div>MID<b>${px(q.mid)}</b></div></div></div>`}).join('');
@@ -124,7 +128,7 @@
     }else{$('windowTitle').textContent='Searching';$('windowMeta').textContent='No active BTC 5-minute market found.';$('clock').textContent='—';$('quotes').innerHTML='<div class="empty">Waiting for current Polymarket book.</div>';$('position').innerHTML='<div class="empty">No active window.</div>'}
     const pos=s.positions||[];
     const pending=pos.filter(x=>x.status==='PENDING_RESOLUTION');
-    const closed=pos.filter(x=>['RESOLVED_WIN','RESOLVED_LOSS'].includes(x.status)).sort((x,y)=>Number(y.resolvedAt||0)-Number(x.resolvedAt||0));
+    const closed=pos.filter(x=>['RESOLVED_WIN','RESOLVED_LOSS','CLOSED_FLIP'].includes(x.status)).sort((x,y)=>Number(y.exitAt||y.resolvedAt||0)-Number(x.exitAt||x.resolvedAt||0));
     $('pendingCount').textContent=pending.length;$('pending').innerHTML=pending.length?pending.slice(0,10).map(x=>row(x,true)).join(''):'<div class="empty">No positions pending.</div>';
     $('closedCount').textContent=closed.length;$('closed').innerHTML=closed.length?closed.slice(0,10).map(x=>row(x)).join(''):'<div class="empty">No resolved trades yet.</div>';
     $('events').innerHTML=(s.events||[]).slice(0,8).map(e=>`<div class="event"><time>${time(e.time)}</time><b>${esc(e.type||'Activity')}</b><p>${esc(e.message||'')}</p></div>`).join('')||'<div class="empty">No recent activity.</div>';

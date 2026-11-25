@@ -1,25 +1,28 @@
 'use strict';
 
 const DipBounceBot = require('./dip-bounce-bot');
+const { isFresh, feeRateFor, windowNet, recoveryShares, sellForFlip } = require('./freqai-recovery');
 
 const STRATEGY = Object.freeze({
-  id: 'btc-5m-freqai-one-entry-paper-v1',
+  id: 'btc-5m-freqai-recovery-flips-paper-v2',
   name: 'FreqAI BTC 5-minute direction model',
-  version: '1',
+  version: '2',
   execution: 'Paper-only Polymarket taker sweep. Freqtrade/FreqAI runs dry for Binance spot data and does not place orders.',
   market: 'BTC Up/Down 5-minute market only.',
   features: 'Binance 1-minute OHLCV return, candle shape, relative volume, volatility and minute-in-window features.',
   target: 'For each 1-minute sample, classify whether the enclosing BTC 5-minute candle closes above or below its first-minute open.',
   prediction: 'Use the higher FreqAI UP/DOWN class probability. No minimum-confidence or edge gate, so an entry is not rejected for a low score.',
-  entry: 'After the first 1-minute sample can close, take one 50-share paper marketable sweep on the model-selected side; if the model has not produced a current-window prediction by 80 seconds, use the live Binance window direction and label it as a warm-up fallback.',
+  entry: 'First entry is 50 shares after 80 seconds. The existing higher-probability selection and labeled Binance warm-up fallback apply only to the initial buy.',
   fill: 'Sweep visible Polymarket asks up to the $1.00 maximum valid outcome price, record actual depth-weighted paper fill and modeled taker fees; partial fills are recorded.',
-  exit: 'Hold remaining shares until the exact market resolves; no TP or SL.',
-  cadence: 'One filled entry per BTC 5-minute market window, when live feeds and executable book liquidity are available.',
+  exit: 'An opposite current-window FreqAI signal strictly above 60% sells the held shares against visible bids, then buys the opposite side. No TP or SL; remaining shares go to official resolution.',
+  sizing: 'Replacement buy is at least 50 shares, sized to recover net realized window losses and fees at a $1 winning resolution. No recovery debt carries to the next window. Cash and visible depth constrain execution; recovery is not guaranteed.',
+  cadence: 'One initial entry, followed by qualifying recovery flips; no same-side adding.',
 });
 
 const ENTRY_DELAY_MS = 80_000;
 const SHARES_PER_WINDOW = 50;
 const MAX_BUY_PRICE = 1.00;
+const FLIP_PROBABILITY = 0.60;
 const SIDES = ['UP', 'DOWN'];
 
 function fresh(value, now, maxAgeMs) {
@@ -102,7 +105,11 @@ class FreqAIBtcBot extends DipBounceBot {
     const now = this.now();
     if (!market || record.marketStatus !== 'OPEN'
       || now < Number(market.start) || now >= Number(market.end)) return;
-    if (record.triggeredSide) return;
+    const currentId = String(market.id || market.slug);
+    const held = this.positions.filter((p) => p.marketId === currentId
+      && p.windowStart === Number(market.start) && p.status === 'OPEN');
+    const hasEntry = this.orders.some((o) => o.action === 'BUY_TAKER'
+      && o.marketId === currentId && o.windowStart === Number(market.start));
 
     const state = record.sideStates[side];
     if (now < Number(market.start) + ENTRY_DELAY_MS) {
@@ -120,16 +127,31 @@ class FreqAIBtcBot extends DipBounceBot {
       return;
     }
     this.modelStatus = decision.source === 'FREQAI' ? 'READY' : 'WARMUP_FALLBACK';
-    this.lastDecision = {
-      ...decision,
-      at: now,
-      windowStart: Number(market.start),
-      windowEnd: Number(market.end),
-    };
     if (decision.side !== side) {
       state.orderStatus = 'WAITING_FOR_SELECTED_SIDE_BOOK';
       state.reason = `${decision.source === 'FREQAI' ? 'FreqAI' : 'Warm-up'} selected ${decision.side}; waiting for its live asks.`;
       return;
+    }
+
+    // Same-side predictions never add to the current holding.
+    if (held.some((p) => p.side === side)) return;
+    if (hasEntry && (decision.source !== 'FREQAI'
+      || !(Number(side === 'UP' ? decision.pUp : decision.pDown) > FLIP_PROBABILITY))) {
+      state.orderStatus = 'HOLDING_UNTIL_STRONG_REVERSAL';
+      state.reason = 'A flip requires an opposite fresh FreqAI probability strictly above 60%.';
+      return;
+    }
+    if (!isFresh(quote, now) || !quote.asks?.length) {
+      state.orderStatus = 'WAITING_FOR_LIQUIDITY';
+      state.reason = 'Waiting for fresh asks on the newly selected side.';
+      return;
+    }
+    for (const position of held) {
+      if (!sellForFlip(this, record, position, now)) {
+        state.orderStatus = 'WAITING_FOR_FLIP_SELL';
+        state.reason = 'Waiting for fresh visible bids to finish selling before the replacement buy.';
+        return;
+      }
     }
 
     const age = Number(quote?.updatedAt);
@@ -141,13 +163,19 @@ class FreqAIBtcBot extends DipBounceBot {
 
     const marketId = String(market.id || market.slug);
     const tokenId = String(market.tokens?.[side] || '');
-    const requestedShares = SHARES_PER_WINDOW;
-    const feeRate = market.feesEnabled === false
-      ? 0
-      : Number(market.feeSchedule?.rate ?? 0.05);
-    if (!Number.isFinite(feeRate) || feeRate < 0) {
+    const feeRate = feeRateFor(market);
+    if (feeRate == null) {
       state.orderStatus = 'BLOCKED_INVALID_FEE';
       state.reason = 'Market fee rate is invalid; no paper order was recorded.';
+      return;
+    }
+    const recoveryDeficit = hasEntry ? Math.max(0, -windowNet(this, record)) : 0;
+    const requestedShares = hasEntry
+      ? recoveryShares(quote, recoveryDeficit, feeRate, SHARES_PER_WINDOW)
+      : SHARES_PER_WINDOW;
+    if (requestedShares == null) {
+      state.orderStatus = 'WAITING_FOR_RECOVERY_DEPTH';
+      state.reason = `Visible asks cannot yet support a buy covering the $${recoveryDeficit.toFixed(2)} window deficit.`;
       return;
     }
 
@@ -212,6 +240,8 @@ class FreqAIBtcBot extends DipBounceBot {
       modelProbabilityDown: decision.pDown,
       modelCandleStart: decision.candleStart,
       model: decision.model,
+      recoveryDeficit,
+      isRecoveryFlip: hasEntry,
       fillRule: `Sweep fresh visible asks up to $${MAX_BUY_PRICE.toFixed(2)}; unfilled remainder is cancelled.`,
     };
     const position = {
@@ -247,9 +277,15 @@ class FreqAIBtcBot extends DipBounceBot {
       modelProbabilityDown: decision.pDown,
       modelCandleStart: decision.candleStart,
       model: decision.model,
+      recoveryDeficit,
+      isRecoveryFlip: hasEntry,
     };
 
     this.cash -= totalCost;
+    this.lastDecision = {
+      ...decision, at: now, windowStart: Number(market.start), windowEnd: Number(market.end),
+      isRecoveryFlip: hasEntry, requestedShares, recoveryDeficit,
+    };
     this.orders.unshift(order);
     this.positions.unshift(position);
     record.triggeredSide = side;
@@ -264,8 +300,8 @@ class FreqAIBtcBot extends DipBounceBot {
       : 'no model score; fresh Binance spot direction';
     state.reason = `${decision.source === 'FREQAI' ? 'FreqAI' : 'Binance warm-up'} selected ${side} (${decisionSummary}); swept ${filledShares.toFixed(2)} shares at $${(cost / filledShares).toFixed(3)} average.`;
     const other = record.sideStates[side === 'UP' ? 'DOWN' : 'UP'];
-    other.orderStatus = 'BLOCKED_ONE_ENTRY';
-    other.reason = `${side} already filled; one entry maximum per BTC window.`;
+    other.orderStatus = 'WAITING_FOR_STRONG_REVERSAL';
+    other.reason = `${side} is held; an opposite FreqAI signal above 60% can trigger a recovery flip.`;
     this.cash = Math.max(0, this.cash);
     this.log(
       `${decision.source === 'FREQAI' ? 'FreqAI' : 'Binance warm-up'} chose BTC ${side}: ${filledShares.toFixed(2)} / ${requestedShares} shares at $${(cost / filledShares).toFixed(3)} average; fee $${fees.toFixed(3)}.`,
@@ -274,7 +310,7 @@ class FreqAIBtcBot extends DipBounceBot {
         timeframe: '5m',
         side,
         outcome: 'neutral',
-        type: decision.source === 'FREQAI' ? 'FREQAI_ENTRY' : 'WARMUP_ENTRY',
+        type: hasEntry ? 'RECOVERY_BUY' : decision.source === 'FREQAI' ? 'FREQAI_ENTRY' : 'WARMUP_ENTRY',
         now,
       },
     );
@@ -313,7 +349,8 @@ class FreqAIBtcBot extends DipBounceBot {
       BTC: {
         baseShares: SHARES_PER_WINDOW,
         sharesPerWindow: SHARES_PER_WINDOW,
-        maxEntriesPerWindow: 1,
+        flipProbabilityAbove: FLIP_PROBABILITY,
+        resetEachWindow: true,
       },
     };
     state.freqai = {
@@ -329,10 +366,18 @@ class FreqAIBtcBot extends DipBounceBot {
       warmupFallback: 'Fresh Binance spot candle direction after 80 seconds only if FreqAI has no current-window prediction.',
     };
     state.currentDecision = this.lastDecision;
+    const record = this.records.get('BTC:5m');
+    state.recovery = {
+      baseShares: SHARES_PER_WINDOW,
+      flipProbabilityAbove: FLIP_PROBABILITY,
+      windowRealizedPnl: record?.market ? windowNet(this, record) : 0,
+      deficit: record?.market ? Math.max(0, -windowNet(this, record)) : 0,
+      resetEachWindow: true,
+    };
     return state;
   }
 }
 
 FreqAIBtcBot.STRATEGY = STRATEGY;
-FreqAIBtcBot._test = { STRATEGY, ENTRY_DELAY_MS, SHARES_PER_WINDOW, MAX_BUY_PRICE, fresh };
+FreqAIBtcBot._test = { STRATEGY, ENTRY_DELAY_MS, SHARES_PER_WINDOW, MAX_BUY_PRICE, fresh, FLIP_PROBABILITY };
 module.exports = FreqAIBtcBot;
