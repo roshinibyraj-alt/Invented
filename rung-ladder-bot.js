@@ -4,11 +4,11 @@ const Base = require('./dip-bounce-bot');
 const config = require('./config');
 const {summarizeMakerRebates} = require('./maker-rebates');
 const STRATEGY = {
-  id: 'btc-eth-independent-depth-ladders',
-  name: 'Independent rung ladders', version: '1',
+  id: 'btc-eth-independent-depth-ladders-wide-tp',
+  name: 'Independent rung ladders', version: '2',
   entry: 'BTC and ETH 5m UP/DOWN: 100-share limits at $0.40, $0.35 and $0.30.',
   fill: 'Depth-backed paper touch; shared liquidity is consumed once until replenished. Limit-price accounting; not guaranteed exchange fills.',
-  takeProfit: 'Each rung targets $0.60, $0.65 or $0.70 respectively, with visible bid depth.',
+  takeProfit: 'Each rung targets $0.90, $0.80 or $0.70 respectively, with visible bid depth.',
   expiry: 'Cancel remaining buys; hold remaining shares to official resolution. No stop-loss.',
   rearm: 'Rearm a rung only after all its purchased shares reach its own TP.',
   fees: 'Passive paper fills have zero fees. Price-dependent maker rebate scenarios are shown separately; estimates are not paid income or trading equity.',
@@ -32,7 +32,7 @@ class RungLadderBot extends Base {
     if (!record.market || record.marketStatus !== 'OPEN' || this.now() >= record.market.end) return;
     const marketId = String(record.market.id || record.market.slug);
     for (const side of ['UP', 'DOWN']) {
-      for (const [limitPrice, tpPrice] of [[0.40, 0.60], [0.35, 0.65], [0.30, 0.70]]) {
+      for (const [limitPrice, tpPrice] of [[0.40, 0.90], [0.35, 0.80], [0.30, 0.70]]) {
         if (!this.orders.some(o => o.marketId === marketId && o.side === side && o.limitPrice === limitPrice)) {
           this.placeRung(record, side, limitPrice, tpPrice, 1);
         }

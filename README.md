@@ -6,8 +6,8 @@ Each of the four outcome sides has independent 100-share limit buys:
 
 | Entry | Take-profit |
 | --- | --- |
-| $0.40 | $0.60 |
-| $0.35 | $0.65 |
+| $0.40 | $0.90 |
+| $0.35 | $0.80 |
 | $0.30 | $0.70 |
 
 Orders are created when the current market is loaded after its window opens. Entry simulation uses visible asks at or below each limit, accounting at the limit price (no favorable price improvement). TP simulation uses visible bids at or above its target, accounting at the target. Only available depth fills; partial fills are possible. Higher buy limits receive depth first. Liquidity is shared across rungs and cannot be reused by repeated unchanged snapshots; only observed replenishment adds capacity.

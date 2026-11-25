@@ -75,3 +75,19 @@ test('strategy change fails safely without archival storage', async () => {
   await assert.rejects(restoreOrResetLedger(bot, {strategyId: 'old'}, 'new'), /archiving/);
   assert.equal(bot.calls.flushed, 0);
 });
+test('wider rung targets reset the old history once and restore future restarts', async () => {
+  const Bot = require('../rung-ladder-bot');
+  const bot = new Bot();
+  let archived = 0;
+  bot.ledgerStore = {async archive(){archived++;},async save(){}};
+  assert.equal(await restoreOrResetLedger(bot,{
+    snapshot:{strategy:{id:'btc-eth-independent-depth-ladders'},account:{cash:5000},orders:[{id:'old'}],positions:[{id:'old'}]},
+  },Bot.STRATEGY.id),'reset');
+  assert.equal(archived,1);
+  assert.equal(bot.cash,require('../config').DEMO_CAPITAL);
+  assert.equal(bot.positions.length,0);
+  assert.equal(bot.orders.length,0);
+  const copy = new Bot();
+  assert.equal(await restoreOrResetLedger(copy,bot.exportLedger(),Bot.STRATEGY.id),'restored');
+  assert.equal(copy.cash,bot.cash);
+});

@@ -24,6 +24,9 @@ test('each outcome gets three independent 100-share rung orders and reserves cas
   assert.equal(bot.cash,3000);
   assert.ok(Math.abs(bot.availableCash()-2790)<1e-8);
   assert.deepEqual(bot.snapshot().markets[0].ladders.UP.map(o=>o.limitPrice),[.4,.35,.3]);
+  for (const side of ['UP','DOWN']) {
+    assert.deepEqual(bot.snapshot().markets[0].ladders[side].map(o=>o.tpPrice),[.9,.8,.7]);
+  }
 });
 test('depth is shared across rungs and unchanged snapshots cannot refill it', () => {
   const {bot,tick} = fixture();
@@ -50,16 +53,17 @@ test('partial TP sells use visible depth; own rung rearms only after fully sold'
   const {bot,tick} = fixture();
   tick(.39,.4,100);
   const p = bot.positions[0];
-  tick(.6,.61,30);
+  tick(.9,.91,30);
   assert.equal(p.shares,70);
-  assert.ok(Math.abs(p.realizedPnl-6)<1e-8);
+  assert.ok(Math.abs(p.realizedPnl-15)<1e-8);
   assert.equal(bot.orders.filter(o=>o.limitPrice===.4 && o.side==='UP').length,1);
-  tick(.6,.61,30);
+  tick(.9,.91,30);
   assert.equal(p.shares,70);
-  tick(.6,.61,100);
+  tick(.9,.91,100);
   assert.equal(p.status,'TAKE_PROFIT');
-  assert.ok(Math.abs(bot.cash-3020)<1e-8);
+  assert.ok(Math.abs(bot.cash-3050)<1e-8);
   assert.equal(bot.orders.find(o=>o.limitPrice===.4 && o.side==='UP').cycle,2);
+  assert.equal(bot.orders.find(o=>o.limitPrice===.4 && o.side==='UP').tpPrice,.9);
   assert.equal(bot.positions.length,1,'new rung cannot buy on same TP event');
   tick(.39,.4,100);
   assert.equal(bot.positions.length,2);
@@ -68,7 +72,7 @@ test('partial TP sells use visible depth; own rung rearms only after fully sold'
 test('partial entry remainder cancels when TP fills and cannot create an orphan buy', () => {
   const {bot,tick} = fixture();
   tick(.39,.4,20);
-  tick(.6,.61,10);
+  tick(.9,.91,10);
   const old = bot.orders.find(o=>o.positionId===bot.positions[0].id);
   assert.equal(old.entryCancelled,true);
   assert.equal(old.reservedCash,0);
@@ -118,9 +122,9 @@ test('insufficient funds never overspend or reserve imaginary cash', () => {
 test('rebate scenarios survive restore and exclude resolution payouts and equity', () => {
   const {bot,record,tick,setNow} = fixture();
   tick(.39,.4,100);
-  tick(.6,.61,30);
+  tick(.9,.91,30);
   const a = bot.accountSnapshot();
-  assert.ok(Math.abs(a.makerRebates.feeEquivalent-1.56)<1e-8);
+  assert.ok(Math.abs(a.makerRebates.feeEquivalent-1.335)<1e-8);
   assert.equal(a.totalFees,0);
   assert.equal(a.totalRebates,0);
   const copy = new Bot({now:()=>START+2000});
@@ -130,4 +134,20 @@ test('rebate scenarios survive restore and exclude resolution payouts and equity
   bot.expireMarket(record,START+300000);
   bot.settleMarket('btc-one','UP',START+301000);
   assert.deepEqual(bot.accountSnapshot().makerRebates,a.makerRebates);
+});
+test('each rung waits for its new TP and rearms at the same new target', () => {
+  const {bot,tick} = fixture();
+  tick(.28,.29,300);
+  const positions = [...bot.positions];
+  for (const [bid, expectedClosed] of [[.6,0],[.65,0],[.69,0],[.7,1],[.79,1],[.8,2],[.89,2],[.9,3]]) {
+    tick(bid,bid+.01,300);
+    assert.equal(positions.filter(p=>p.status==='TAKE_PROFIT').length,expectedClosed,`bid ${bid}`);
+  }
+  for (const p of positions) {
+    const current = bot.orders.find(o=>o.side==='UP' && o.limitPrice===p.entryPrice);
+    assert.equal(current.cycle,2);
+    assert.equal(current.tpPrice,p.tpPrice);
+    assert.equal(p.exitPrice,p.tpPrice);
+  }
+  assert.ok(Math.abs(bot.cash-3135)<1e-8);
 });
