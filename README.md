@@ -1,33 +1,32 @@
-# Invented BTC/ETH 5-minute cross-pair paper bot
+# Invented independent rung paper bot
 
-Invented tracks the Polymarket BTC and ETH UP/DOWN markets on 5-minute windows. It is a paper simulator only: it does not submit real orders or use wallet credentials.
+Paper-only BTC and ETH five-minute UP/DOWN ladders. No real CLOB orders or wallet credentials are used.
 
-## Strategy
+Each of the four outcome sides has independent 100-share limit buys:
 
-Four cross-pairs are evaluated independently:
+| Entry | Take-profit |
+| --- | --- |
+| $0.40 | $0.60 |
+| $0.35 | $0.65 |
+| $0.30 | $0.70 |
 
-- BTC UP + ETH DOWN
-- ETH UP + BTC DOWN
-- BTC UP + ETH UP
-- BTC DOWN + ETH DOWN
+Orders are created when the current market is loaded after its window opens. Entry simulation uses visible asks at or below each limit, accounting at the limit price (no favorable price improvement). TP simulation uses visible bids at or above its target, accounting at the target. Only available depth fills; partial fills are possible. Higher buy limits receive depth first. Liquidity is shared across rungs and cannot be reused by repeated unchanged snapshots; only observed replenishment adds capacity.
 
-For each pair, the bot watches the two fresh best asks from the Polymarket CLOB WebSocket. When their sum is strictly below $0.80, it makes one paper taker entry for that pair in the current 5-minute window. All four pairs can enter independently during the same window.
+Once TP begins on a partially filled entry, its unfilled buy remainder is cancelled. After the purchased quantity has all sold at its own TP, that rung rearms for 100 shares, repeatable until expiry. Rearming cannot buy on the same book event as the completing TP. Cash is reserved for unfilled quantity and unfunded orders wait rather than overspend.
 
-Each leg always buys 100 paper shares at its current best ask, regardless of available ask depth or previous results. This is an explicit simplified full-fill assumption, not evidence that the quantity could execute at that price in real trading. Modeled taker fees still apply. Fresh, correctly identified current-window prices and sufficient paper cash remain required. Entry is skipped while the same cross-pair has an earlier position awaiting official resolution.
+At window end all unfilled buys cancel, while unclosed shares wait for their own exact market's official result. There is no stop-loss, pair exit, cross-pair signal, martingale, or blocker from earlier unresolved windows. Official resolution is checked every five seconds and pays $1/$0. Subsequent windows start independent ladders.
 
-The four pairs are inverse-linked: BTC UP + ETH UP ↔ BTC DOWN + ETH DOWN, and BTC UP + ETH DOWN ↔ BTC DOWN + ETH UP. When one pair's own fresh combined best asks are strictly above $1.22, the bot sells that pair's remaining shares against visible bids, recording actual swept proceeds and sell fees. If the visible bid depth is insufficient, it sells what is available and retries the remainder on later fresh book updates. The inverse pair is not sold by this event and may enter only if its own fresh ask sum is below $0.80.
+## Simulation limitations
 
-The previous per-side exits are restored: a best bid at or above $0.99 closes the remaining quantity with a modeled $1 payout per share; a fresh empty bid book triggers the $0 stop-loss. Any remaining shares at window end wait for the official result of their exact BTC or ETH market. The bot checks pending markets every 5 seconds and settles only after Polymarket publishes a closed market and a definitive winning outcome. Before the window ends, dashboard cards show the live bid and floating P&L; resolution-waiting cards retain the last pre-expiry mark.
+Depth-backed touch is not proof of exchange execution or queue priority. Visible liquidity may cancel before a real order arrives, and this paper model is not a live maker/taker matching engine. Limit-price accounting assumes passive execution with zero taker fee. It does not invent maker rebates: estimated rebates remain zero until a verified payment exists. Real marketable limits may execute as takers and incur fees.
 
-Wins and losses do not change sizing. Each pair can have one entry per window. A delayed official result delays the next entry for that same pair, but does not block the other pairs.
+## Dashboard
 
-## Data and dashboard
+Phone-first dashboard with account equity/cash/reserves, large live bid/ask/mid prices, rung fill/TP progress, current shares and floating P&L, pending resolution, colored closed-trade outcomes, and strategy details at the bottom. Quotes come from the existing Polymarket CLOB WebSocket; metadata/outcomes from Gamma. Missing/stale feeds do not create fills.
 
-Market metadata and official outcomes come from Polymarket Gamma. The live order books use a Polymarket CLOB WebSocket subscription for the active BTC and ETH token IDs. The mobile-first dashboard puts balance and performance at the top, followed by four cross-pair cards. Each card shows its inverse pair, entry and exit thresholds, both legs' shares, average entry, cost and fees, live bid, sold/remaining quantities, floating P&L, and final exit or resolution result.
+## Persistence
 
-## Persistent paper history
-
-On Railway, `PAPER_LEDGER_PATH` should point into the mounted persistent volume. This release uses a new strategy ID, so deployment starts with a clean paper ledger and saves the fresh state to the configured ledger path. Later restarts restore the four-pair history and open positions.
+`PAPER_LEDGER_PATH` must point into the Railway mounted persistent volume. On the first strategy migration, the previous ledger is archived alongside the active ledger before a clean strategy ledger is saved; startup fails rather than silently overwrite it if archival fails. Subsequent restarts restore this strategy's cash, positions, orders, reservations, history, and consumed liquidity. Expired orders are not carried into new markets.
 
 ## Run
 

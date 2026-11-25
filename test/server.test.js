@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
+test('dashboard serves the independent rung strategy', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -52,34 +52,14 @@ test('dashboard serves the BTC/ETH 5-minute cross-pair strategy', async t => {
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented/);
-  assert.match(html, /Four cross-pairs/);
-  assert.match(html, /Paper entry assumption/);
-  assert.match(html, /Performance, market detail, fill checks, and history/);
-  assert.match(html, /BTC UP \+ ETH DOWN, ETH UP \+ BTC DOWN, BTC UP \+ ETH UP, and BTC DOWN \+ ETH DOWN/);
-  assert.match(html, /Inverse-pair exits \+ ask-sum entries/);
-  assert.match(html, /below \$0\.80/);
-  assert.match(html, /Always buy 100 shares on each leg/);
-  assert.match(html, /regardless of previous wins or losses/);
-  assert.match(html, /History is saved in persistent Railway storage/);
-  assert.match(html, /without checking ask depth/);
-  assert.match(html, /Exit one pair without forcing its inverse to sell/);
-  assert.match(html, /\$1 per remaining share/);
-  assert.match(html, /empty fresh bid book counts as a \$0 stop/i);
-  assert.match(html, /inverse enters only when its own fresh asks are below \$0\.80/i);
-  assert.match(html, /Official result checked every/);
-  assert.match(html, /Last pre-resolution mark/);
-  assert.match(html, /pair-grid/);
-  assert.match(html, /Recent trades/);
+  assert.match(html, /0\.40/);
+  assert.match(html, /0\.35/);
+  assert.match(html, /0\.30/);
   assert.match(html, /official resolution/);
-  assert.match(html, /SIMULATION ONLY/);
-  assert.match(html, /positionList/);
-  assert.match(html, /orderList/);
-  assert.match(html, /eventList/);
-  assert.ok(html.indexOf('aria-label="Paper account summary"') < html.indexOf('id="positionsHeading"'));
-  assert.ok(html.indexOf('id="positionsHeading"') < html.indexOf('aria-label="Performance"'));
-  assert.match(html, /id="feedStatus"/);
-  assert.ok(html.indexOf('aria-label="Market activity"') > html.indexOf('aria-labelledby="strategyHeading"'));
-  assert.ok(html.indexOf('aria-label="Market activity"') < html.indexOf('<footer>'));
+  assert.match(html, /id="markets"/);
+  assert.match(html, /id="pending"/);
+  assert.match(html, /id="closed"/);
+  assert.match(html, /id="feedPill"/);
 });
 
 test('unknown dashboard paths still return 404', async t => {

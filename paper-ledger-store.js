@@ -29,6 +29,13 @@ class PaperLedgerStore {
     await fs.promises.rename(temporaryPath, this.filePath);
   }
 
+  async archive(ledger) {
+    const name = String(ledger.strategyId || ledger.snapshot?.strategy?.id || 'previous').replace(/[^a-z0-9_-]/gi, '_');
+    const archivePath = `${this.filePath}.archive-${name}-${Date.now()}.json`;
+    await fs.promises.writeFile(archivePath, JSON.stringify(ledger), { mode: 0o600, flag: 'wx' });
+    return archivePath;
+  }
+
   static decodeBootstrap(encoded) {
     if (!encoded) return null;
     try {

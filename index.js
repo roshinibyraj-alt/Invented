@@ -8,7 +8,9 @@ async function restoreOrResetLedger(bot, savedLedger, strategyId) {
     return 'restored';
   }
   if (savedLedger) {
-    bot.log('Paper history reset for the inverse-pair exit and TP/SL strategy.', {
+    if (!bot.ledgerStore?.archive) throw new Error('Cannot replace the strategy without archiving the prior paper ledger.');
+    await bot.ledgerStore.archive(savedLedger);
+    bot.log('Previous paper ledger archived; started independent rung ladders.', {
       type: 'LEDGER_RESET',
       now: Date.now(),
     });
@@ -25,7 +27,7 @@ async function main() {
     return;
   }
 
-  const Bot = require('./cross-pair-bot');
+  const Bot = require('./rung-ladder-bot');
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
@@ -41,7 +43,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- BTC/ETH 5-minute inverse-pair strategy; no live orders are sent.');
+  console.log('MODE: DEMO -- independent BTC/ETH 5-minute rung ladders; no live orders are sent.');
 
   let stopping = false;
   const shutdown = async () => {

@@ -1,898 +1,369 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#f4f5ef">
-  <title>Invented — Paper trading cockpit</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --canvas: #f4f5ef;
-      --paper: #fffefa;
-      --ink: #182822;
-      --muted: #66736b;
-      --line: #dfe5d9;
-      --lime: #d7f36b;
-      --green: #176e4c;
-      --green-wash: #e2f4e9;
-      --coral: #e66854;
-      --coral-wash: #fff0e9;
-      --blue: #3667ca;
-      --blue-wash: #eaf0ff;
-      --yellow: #f5c746;
-      --shadow: 0 10px 32px rgba(27, 44, 33, .055);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100dvh;
-      background:
-        radial-gradient(ellipse at 95% -10%, rgba(215,243,107,.34), transparent 35rem),
-        var(--canvas);
-      color: var(--ink);
-      font: 14px/1.45 "Avenir Next", Avenir, "Segoe UI", sans-serif;
-      -webkit-font-smoothing: antialiased;
-    }
-    button { font: inherit; }
-    .shell { width: min(1160px, 100%); margin: 0 auto; padding: 16px 14px 36px; }
-    .topbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:22px; }
-    .brand { display:flex; align-items:center; gap:11px; min-width:0; }
-    .brand-mark {
-      width:40px; height:40px; display:grid; place-items:center; flex:none;
-      border-radius:13px; background:var(--lime); color:#27321c;
-      font-size:19px; font-weight:950; letter-spacing:-.08em;
-      transform:rotate(-4deg);
-    }
-    .brand-name { font-size:16px; font-weight:900; letter-spacing:-.045em; }
-    .brand-caption { color:var(--muted); font-size:10px; font-weight:750; letter-spacing:.12em; text-transform:uppercase; }
-    .top-status { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
-    .live-pill, .meta-pill, .status-tag, .filter {
-      display:inline-flex; align-items:center; justify-content:center; gap:6px;
-      border:1px solid var(--line); border-radius:999px; padding:7px 10px;
-      background:var(--paper); color:var(--muted); font-size:10px; line-height:1;
-      font-weight:850; letter-spacing:.055em; text-transform:uppercase; white-space:nowrap;
-    }
-    .live-pill { color:var(--green); background:var(--green-wash); border-color:#c8e7d3; }
-    .live-pill::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; }
-    .live-pill.warn { color:#986d09; background:#fff5d7; border-color:#f1dfaa; }
-    .live-pill.bad { color:#a93d34; background:#ffebe6; border-color:#f0c6bc; }
-    .hero {
-      position:relative; overflow:hidden; display:grid; gap:22px;
-      padding:24px 20px; border-radius:25px; background:#20382e; color:#fbfff3;
-      box-shadow:var(--shadow); margin-bottom:14px;
-    }
-    .hero::after {
-      content:""; position:absolute; right:-74px; top:-114px; width:250px; height:250px;
-      border:1px solid rgba(215,243,107,.26); border-radius:50%;
-      box-shadow:0 0 0 24px rgba(215,243,107,.04),0 0 0 50px rgba(215,243,107,.035);
-      pointer-events:none;
-    }
-    .hero-copy, .hero-side { position:relative; z-index:1; }
-    .eyebrow { color:#b8d86c; font-size:10px; font-weight:900; letter-spacing:.15em; text-transform:uppercase; }
-    h1 { max-width:700px; margin:8px 0 0; font-size:clamp(25px,6vw,38px); line-height:1; letter-spacing:-.055em; }
-    .hero-copy p { max-width:560px; margin:13px 0 0; color:#c6d6c8; font-size:13px; }
-    .hero-side { display:grid; grid-template-columns:1fr 1fr; gap:8px; align-content:end; }
-    .hero-stat { min-width:0; padding:12px 13px; border:1px solid rgba(255,255,255,.13); border-radius:15px; background:rgba(255,255,255,.07); }
-    .hero-stat span { display:block; color:#b5c8b7; font-size:10px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
-    .hero-stat strong { display:block; overflow:hidden; margin-top:4px; text-overflow:ellipsis; white-space:nowrap; font-size:18px; font-variant-numeric:tabular-nums; letter-spacing:-.04em; }
-    .hero-stat.wide { grid-column:1/-1; }
-    .hero-stat.wide strong { font-size:14px; }
-    .error-banner { display:none; align-items:center; justify-content:space-between; gap:12px; margin:0 0 14px; padding:12px 14px; border:1px solid #edc2b8; border-radius:14px; color:#8c342d; background:#fff0ec; }
-    .error-banner.visible { display:flex; }
-    .error-banner strong { display:block; }
-    .error-banner small { color:#9b5c54; }
-    .retry { border:0; border-radius:10px; padding:9px 12px; color:#fff; background:#a94337; font-size:11px; font-weight:850; cursor:pointer; }
-    .retry:hover { background:#8f332a; }
-    .section { margin-top:22px; }
-    .feed-strip { display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin-top:12px; padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:var(--paper); color:var(--muted); font-size:10px; }
-    .feed-strip strong { color:var(--ink); }
-    .feed-dot { width:8px; height:8px; flex:none; border-radius:50%; background:#9aab98; }
-    .feed-strip.connected .feed-dot { background:var(--green); box-shadow:0 0 0 3px #dff2e5; }
-    .feed-strip.warn .feed-dot { background:#c08b18; }
-    .feed-strip.bad .feed-dot { background:var(--coral); }
-    .section-head { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; margin:0 2px 11px; }
-    .section-kicker { color:var(--muted); font-size:10px; font-weight:900; letter-spacing:.14em; text-transform:uppercase; }
-    h2 { margin:2px 0 0; font-size:20px; letter-spacing:-.045em; }
-    .section-note { color:var(--muted); font-size:11px; text-align:right; }
-    .metrics { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
-    .metric {
-      min-width:0; padding:15px; border:1px solid var(--line); border-radius:17px;
-      background:var(--paper); box-shadow:var(--shadow);
-    }
-    .metric-label { color:var(--muted); font-size:10px; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }
-    .metric-value { overflow:hidden; margin-top:7px; font-size:clamp(21px,6vw,29px); line-height:1; font-weight:950; letter-spacing:-.065em; text-overflow:ellipsis; font-variant-numeric:tabular-nums; }
-    .metric-detail { display:block; margin-top:7px; color:var(--muted); font-size:10px; }
-    .positive { color:var(--green)!important; } .negative { color:var(--coral)!important; } .neutral { color:var(--ink)!important; }
-    .market-grid { display:grid; grid-template-columns:1fr; gap:10px; }
-    .market-card { min-width:0; overflow:hidden; border:1px solid var(--line); border-radius:18px; background:var(--paper); box-shadow:var(--shadow); }
-    .market-card[data-asset="BTC"] { --asset-color:#d7a929; --asset-wash:#fff6d8; }
-    .market-card[data-asset="ETH"] { --asset-color:#687bd1; --asset-wash:#eef0ff; }
-    .market-card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; padding:14px 14px 12px; border-bottom:1px solid #edf0e9; }
-    .asset-lockup { display:flex; align-items:center; gap:10px; min-width:0; }
-    .asset-token { display:grid; width:37px; height:37px; flex:none; place-items:center; border-radius:12px; color:var(--asset-color); background:var(--asset-wash); font-size:11px; font-weight:950; letter-spacing:-.04em; }
-    .asset-title { min-width:0; }
-    .asset-title strong { display:block; font-size:14px; letter-spacing:-.025em; }
-    .asset-title small { display:block; overflow:hidden; max-width:210px; color:var(--muted); font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
-    .time-tag { padding:6px 8px; border-radius:8px; color:var(--asset-color); background:var(--asset-wash); font-size:10px; font-weight:900; }
-    .market-card-body { padding:12px; }
-    .market-window { display:flex; justify-content:space-between; gap:8px; margin:-2px 1px 9px; color:var(--muted); font-size:10px; }
-    .market-window strong { color:var(--ink); font-weight:800; }
-    .sides { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-    .side-card { min-width:0; padding:10px; border:1px solid #e9ede5; border-radius:13px; background:#fafbf7; }
-    .side-card.up { border-top:3px solid #5eae7b; }
-    .side-card.down { border-top:3px solid #e5826e; }
-    .side-head { display:flex; align-items:center; justify-content:space-between; gap:5px; }
-    .side-name { font-size:10px; font-weight:950; letter-spacing:.1em; }
-    .side-card.up .side-name { color:#28784b; }
-    .side-card.down .side-name { color:#b74e3d; }
-    .order-state { overflow:hidden; max-width:65%; padding:4px 6px; border-radius:999px; color:#69746d; background:#edf0e9; font-size:8px; font-weight:900; text-overflow:ellipsis; text-transform:uppercase; white-space:nowrap; }
-    .order-state.armed { color:#89650e; background:#fff1c6; }
-    .order-state.filled { color:#176e4c; background:#dff2e5; }
-    .midpoint { margin-top:8px; font-size:24px; line-height:1; font-weight:950; letter-spacing:-.07em; font-variant-numeric:tabular-nums; }
-    .midpoint small { color:var(--muted); font-size:9px; font-weight:750; letter-spacing:0; }
-    .book-row { display:grid; grid-template-columns:1fr 1fr; gap:5px; margin-top:9px; }
-    .book-cell { padding:6px 7px; border-radius:8px; background:#f0f2ed; }
-    .book-cell span { display:block; color:var(--muted); font-size:8px; font-weight:800; letter-spacing:.07em; text-transform:uppercase; }
-    .book-cell strong { display:block; margin-top:2px; font-size:12px; font-variant-numeric:tabular-nums; }
-    .side-flags { display:flex; flex-wrap:wrap; gap:4px; margin-top:7px; }
-    .flag { padding:3px 5px; border-radius:5px; color:#68736c; background:#eef0ea; font-size:8px; font-weight:800; }
-    .flag.yes { color:#226c45; background:#e2f3e7; }
-    .flag.no { color:#818a82; }
-    .card-foot { display:flex; justify-content:space-between; gap:8px; margin-top:10px; padding-top:9px; border-top:1px dashed #e4e8df; color:var(--muted); font-size:9px; }
-    .card-foot strong { color:var(--ink); font-weight:800; }
-    .panel { min-width:0; padding:15px; border:1px solid var(--line); border-radius:18px; background:var(--paper); box-shadow:var(--shadow); }
-    .split { display:grid; grid-template-columns:1fr; gap:12px; }
-    .panel-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:12px; }
-    .panel-head h3 { margin:0; font-size:15px; letter-spacing:-.035em; }
-    .panel-head p { margin:3px 0 0; color:var(--muted); font-size:10px; }
-    .count-chip { flex:none; padding:6px 8px; border-radius:8px; color:#4f5f53; background:#edf1e8; font-size:9px; font-weight:900; }
-    .position-list, .activity-list { display:grid; gap:8px; }
-    .position-card, .activity-card { padding:12px; border:1px solid #e9ede5; border-radius:14px; background:#fafbf7; }
-    .position-card { border-left:4px solid #8c9a8c; }
-    .position-card.up { border-left-color:#34a66b; background:linear-gradient(105deg,#e9f8ee,#fffefa 60%); }
-    .position-card.down { border-left-color:#ef735e; background:linear-gradient(105deg,#fff0eb,#fffefa 60%); }
-    .position-top, .activity-top { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }
-    .position-title strong, .activity-title strong { font-size:12px; }
-    .position-title small, .activity-title small { display:block; margin-top:2px; color:var(--muted); font-size:9px; }
-    .position-values { display:grid; grid-template-columns:repeat(3,1fr); gap:7px; margin-top:10px; }
-    .position-values div { min-width:0; }
-    .position-values span { display:block; color:var(--muted); font-size:8px; font-weight:800; text-transform:uppercase; }
-    .position-values strong { display:block; overflow:hidden; margin-top:2px; font-size:11px; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums; }
-    .position-pnl { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:9px; padding-top:9px; border-top:1px solid rgba(37,53,34,.11); }
-    .position-pnl span { color:var(--muted); font-size:9px; font-weight:850; letter-spacing:.05em; text-transform:uppercase; }
-    .position-pnl strong { font-size:20px; line-height:1; font-weight:950; letter-spacing:-.05em; font-variant-numeric:tabular-nums; }
-    .badge-side { padding:4px 6px; border-radius:6px; color:#276d48; background:#e1f2e7; font-size:8px; font-weight:900; }
-    .badge-side.down { color:#a6493b; background:#ffebe5; }
-    .pair-grid { display:grid; grid-template-columns:1fr; gap:10px; margin-bottom:10px; }
-    .pair-card { min-width:0; overflow:hidden; border:1px solid var(--line); border-radius:18px; background:var(--paper); box-shadow:var(--shadow); }
-    .pair-card[data-pair="btc-up-eth-down"] { border-top:4px solid #e2b632; }
-    .pair-card[data-pair="eth-up-btc-down"] { border-top:4px solid #7887dd; }
-    .pair-card[data-pair="btc-up-eth-up"] { border-top:4px solid #42a878; }
-    .pair-card[data-pair="btc-down-eth-down"] { border-top:4px solid #e47a68; }
-    .pair-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; padding:13px 13px 10px; border-bottom:1px solid #edf0e9; }
-    .pair-head h3 { margin:0; font-size:14px; letter-spacing:-.03em; }
-    .pair-head small { display:block; margin-top:3px; color:var(--muted); font-size:9px; }
-    .pair-state { flex:none; padding:5px 7px; border-radius:999px; color:#80620e; background:#fff2c8; font-size:8px; font-weight:900; text-transform:uppercase; }
-    .pair-state.active { color:#176e4c; background:#e1f2e7; }
-    .pair-state.loss { color:#a94739; background:#ffebe5; }
-    .pair-body { display:grid; gap:10px; padding:11px; }
-    .pair-summary { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; }
-    .pair-summary div { min-width:0; padding:8px; border-radius:10px; background:#f2f4ee; }
-    .pair-summary span { display:block; color:var(--muted); font-size:8px; font-weight:850; letter-spacing:.05em; text-transform:uppercase; }
-    .pair-summary strong { display:block; overflow:hidden; margin-top:3px; font-size:12px; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums; }
-    .pair-leg-quotes { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
-    .pair-leg-quotes > span { display:grid; grid-template-columns:1fr auto; gap:2px 5px; min-width:0; padding:7px 8px; border-radius:9px; background:#f5f6f2; color:var(--muted); font-size:9px; font-weight:800; }
-    .pair-leg-quotes strong { color:var(--ink); font-size:11px; font-variant-numeric:tabular-nums; }
-    .pair-leg-quotes small { grid-column:1/-1; color:var(--muted); font-size:8px; font-weight:700; }
-    .pair-leg-quotes .stale { background:#fff3e0; }
-    .trade-card { min-width:0; padding:10px; border:1px solid #e7ebe2; border-radius:13px; background:#fbfcf8; }
-    .trade-card.recent { background:#f7f8f4; }
-    .trade-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:8px; }
-    .trade-head strong { display:block; font-size:10px; }
-    .trade-head small { display:block; margin-top:2px; color:var(--muted); font-size:8px; }
-    .trade-status { flex:none; padding:4px 6px; border-radius:6px; color:#59675d; background:#eef0e9; font-size:8px; font-weight:900; text-transform:uppercase; }
-    .trade-status.win { color:#176e4c; background:#e1f2e7; }
-    .trade-status.loss { color:#a94739; background:#ffebe5; }
-    .trade-legs { display:grid; grid-template-columns:1fr; gap:7px; }
-    .trade-leg { min-width:0; padding:9px; border-radius:10px; background:#fff; border-left:3px solid #d7a929; }
-    .trade-leg.down { border-left-color:#e5826e; }
-    .trade-leg-head { display:flex; justify-content:space-between; gap:6px; align-items:center; }
-    .trade-leg-head strong { font-size:10px; }
-    .trade-leg-head span { color:var(--muted); font-size:8px; font-weight:850; text-transform:uppercase; }
-    .trade-leg-metrics { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px 8px; margin-top:7px; }
-    .trade-leg-metrics div { min-width:0; }
-    .trade-leg-metrics span { display:block; color:var(--muted); font-size:7px; font-weight:850; text-transform:uppercase; }
-    .trade-leg-metrics strong { display:block; overflow:hidden; margin-top:2px; font-size:10px; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums; }
-    .trade-pnl { display:flex; justify-content:space-between; gap:8px; margin-top:7px; padding-top:6px; border-top:1px solid #edf0e9; }
-    .trade-pnl span { color:var(--muted); font-size:8px; font-weight:850; text-transform:uppercase; }
-    .trade-pnl strong { font-size:13px; font-weight:950; font-variant-numeric:tabular-nums; }
-    .trade-empty { padding:13px 10px; border:1px dashed #dce2d8; border-radius:10px; color:var(--muted); text-align:center; font-size:9px; }
-    .trade-history summary { color:var(--muted); font-size:9px; font-weight:850; cursor:pointer; }
-    .trade-history-list { display:grid; gap:7px; margin-top:8px; }
-    .trade-history { display:grid; gap:7px; }
-    .fill-audit { margin-top:7px; padding-top:6px; border-top:1px dashed #dfe5d9; }
-    .fill-audit summary { color:#58665c; font-size:8px; font-weight:850; cursor:pointer; }
-    .fill-audit-content { display:grid; gap:4px; margin-top:6px; color:var(--muted); font-size:8px; overflow-wrap:anywhere; }
-    .sizing-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:11px; }
-    .sizing-card { min-width:0; padding:11px 12px; border:1px solid #dce7d8; border-radius:14px; background:#f8fbf2; }
-    .sizing-card[data-asset="BTC"] { border-top:4px solid #e2b632; }
-    .sizing-card[data-asset="ETH"] { border-top:4px solid #7887dd; }
-    .sizing-card[data-pair="btc-up-eth-down"] { border-top:4px solid #e2b632; }
-    .sizing-card[data-pair="eth-up-btc-down"] { border-top:4px solid #7887dd; }
-    .sizing-label { display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; gap:6px; color:var(--muted); font-size:9px; font-weight:900; letter-spacing:.08em; text-transform:uppercase; }
-    .sizing-value { display:block; margin-top:6px; font-size:23px; line-height:1; font-weight:950; letter-spacing:-.06em; font-variant-numeric:tabular-nums; }
-    .sizing-note { display:block; margin-top:6px; color:var(--muted); font-size:9px; }
-    .sizing-result { color:#657167; font-size:8px; font-weight:850; }
-    .sizing-result.win { color:#176e4c; } .sizing-result.loss { color:#bf4d3d; }
-    .persistence-note { margin:8px 2px 0; color:#526047; font-size:10px; line-height:1.35; font-weight:800; }
-    .persistence-note.error { color:#a33d35; }
-    .list-scroll { max-height:400px; overflow:auto; }
-    .activity-line { display:flex; align-items:flex-start; gap:9px; padding:9px 2px; border-bottom:1px solid #edf0e9; }
-    .activity-line:last-child { border-bottom:0; }
-    .activity-dot { width:8px; height:8px; margin-top:4px; flex:none; border-radius:50%; background:var(--blue); }
-    .activity-copy { min-width:0; flex:1; }
-    .activity-copy strong { display:block; font-size:11px; line-height:1.35; overflow-wrap:anywhere; }
-    .activity-copy small { display:block; margin-top:3px; color:var(--muted); font-size:9px; }
-    .activity-state { flex:none; color:var(--muted); font-size:8px; font-weight:900; text-transform:uppercase; }
-    .chart { width:100%; height:148px; margin-top:7px; overflow:visible; }
-    .chart-grid { stroke:#e5e9e1; stroke-width:1; }
-    .chart-line { fill:none; stroke:#3d78d0; stroke-width:3; stroke-linecap:round; stroke-linejoin:round; }
-    .chart-area { fill:rgba(61,120,208,.1); }
-    .chart-empty { padding:25px 10px; color:var(--muted); text-align:center; font-size:11px; }
-    .strategy-card { display:grid; gap:13px; padding:18px; border-radius:20px; color:#253522; background:var(--lime); }
-    .advanced-panel { margin-top:18px; border:1px solid var(--line); border-radius:16px; background:rgba(255,255,255,.55); }
-    .advanced-panel > summary { padding:13px 15px; color:#405047; font-size:11px; font-weight:900; cursor:pointer; }
-    .advanced-content { padding:0 13px 14px; }
-    .advanced-content .section { margin-top:14px; }
-    .strategy-title { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
-    .strategy-title h3 { margin:3px 0 0; font-size:20px; letter-spacing:-.045em; }
-    .strategy-title .eyebrow { color:#566b28; }
-    .paper-stamp { flex:none; padding:7px 9px; border:1px solid rgba(37,53,34,.24); border-radius:999px; font-size:9px; font-weight:950; letter-spacing:.07em; }
-    .strategy-steps { display:grid; gap:7px; }
-    .strategy-step { display:grid; grid-template-columns:25px 1fr; gap:9px; align-items:start; padding:9px 0; border-top:1px solid rgba(37,53,34,.16); }
-    .step-num { display:grid; width:23px; height:23px; place-items:center; border-radius:8px; color:#f9ffeb; background:#344d2c; font-size:10px; font-weight:900; }
-    .strategy-step strong { display:block; font-size:11px; }
-    .strategy-step span { display:block; margin-top:2px; color:#506047; font-size:10px; }
-    .strategy-meta { display:flex; flex-wrap:wrap; gap:6px; }
-    .meta-pill { background:rgba(255,255,255,.45); border-color:rgba(37,53,34,.12); color:#47573b; }
-    .empty { padding:18px 12px; border:1px dashed #dce2d8; border-radius:12px; color:var(--muted); background:#fafbf7; text-align:center; font-size:11px; }
-    .loading-card { height:145px; border-radius:16px; background:linear-gradient(100deg,#edf0e8 20%,#f7f8f3 38%,#edf0e8 60%); background-size:200% 100%; animation:shimmer 1.45s ease-in-out infinite; }
-    @keyframes shimmer { to { background-position-x:-200%; } }
-    footer { padding:20px 4px 0; color:var(--muted); text-align:center; font-size:9px; }
-    @media (min-width:640px) {
-      .shell { padding:22px 22px 42px; }
-      .hero { grid-template-columns:1.25fr .8fr; align-items:end; padding:30px; }
-      .market-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
-      .metrics { grid-template-columns:repeat(4,minmax(0,1fr)); gap:11px; }
-      .split { grid-template-columns:1fr 1fr; }
-      .strategy-card { grid-template-columns:.8fr 1.2fr; align-items:start; padding:22px; }
-      .strategy-title { display:block; }
-      .paper-stamp { display:inline-flex; margin-top:14px; }
-      .pair-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
-      .trade-legs { grid-template-columns:1fr 1fr; }
-    }
-    @media (min-width:980px) {
-      .shell { padding-top:26px; }
-      .market-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
-      .section { margin-top:22px; }
-      .market-card-body { padding:14px; }
-      .side-card { padding:12px; }
-      .bottom-grid { display:grid; grid-template-columns:1.1fr .9fr; gap:12px; align-items:start; }
-    }
-    @media (max-width:420px) {
-      .shell { padding-left:11px; padding-right:11px; }
-      .brand-caption { font-size:9px; }
-      .brand-mark { width:36px; height:36px; }
-      .topbar { align-items:flex-start; }
-      .top-status { max-width:130px; }
-      .meta-pill { font-size:9px; padding:7px 8px; }
-      .hero { padding:21px 17px; }
-      .metric { padding:12px; }
-      .metric-label { font-size:9px; }
-      .section-head { align-items:flex-start; flex-direction:column; }
-      .section-note { text-align:left; }
-    }
-    @media (prefers-reduced-motion:reduce) {
-      *, *::before, *::after { scroll-behavior:auto!important; animation-duration:.01ms!important; animation-iteration-count:1!important; }
-    }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f6efe2">
+<title>Invented — Ladder board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@500;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f6efe2; --card:#fffaf0; --ink:#1d1a2e; --muted:#6f6879; --line:#e7dcc8;
+  --btc:#f29d1a; --btc-wash:#fff0d4; --eth:#6457d6; --eth-wash:#ece9ff;
+  --up:#0f9d74; --up-wash:#dcf5ea; --down:#e0433a; --down-wash:#ffe3df;
+  --sky:#2f7fd8; --sky-wash:#e1eeff; --sun:#ffd34d;
+  --mono:"JetBrains Mono",ui-monospace,monospace; --sans:"Bricolage Grotesque",system-ui,sans-serif;
+  --shadow:0 1px 0 rgba(29,26,46,.06),0 10px 28px -14px rgba(29,26,46,.25);
+}
+*{box-sizing:border-box}
+body{margin:0;min-height:100dvh;background:var(--bg);color:var(--ink);font:15px/1.4 var(--sans);-webkit-font-smoothing:antialiased}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.35;background-image:radial-gradient(rgba(29,26,46,.08) 1px,transparent 1px);background-size:14px 14px;z-index:0}
+.shell{position:relative;z-index:1;width:min(1180px,100%);margin:0 auto;padding:14px 12px 40px}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.pos{color:var(--up)!important}.neg{color:var(--down)!important}.zero{color:var(--ink)}
+header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}
+.brand{display:flex;align-items:center;gap:10px}
+.mark{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;background:var(--ink);color:var(--sun);font-weight:800;font-size:20px;transform:rotate(-5deg)}
+.brand b{display:block;font-size:19px;letter-spacing:-.04em}.brand small{color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border-radius:999px;font:800 11px/1 var(--sans);letter-spacing:.06em;text-transform:uppercase;background:var(--card);border:1.5px solid var(--line);color:var(--muted);white-space:nowrap;transition:background .3s,color .3s,border-color .3s}
+.pill.live{background:var(--up-wash);color:var(--up);border-color:#b5e6d2}.pill.warn{background:#fff4cc;color:#94690a;border-color:#f0dc92}.pill.bad{background:var(--down-wash);color:var(--down);border-color:#f5bdb7}
+.pill.live::before,.pill.warn::before,.pill.bad::before{content:"";width:8px;height:8px;border-radius:50%;background:currentColor}
+.pill.live::before{animation:beat 1.6s ease-in-out infinite}
+@keyframes beat{50%{opacity:.3}}
+.banner{display:none;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;padding:12px 14px;border-radius:14px;background:var(--down);color:#fff8f2}
+.banner.show{display:flex;animation:drop .3s ease}.banner.stale{background:#c88a0c}
+.banner small{display:block;opacity:.85;font-size:12px}
+.banner button{border:0;border-radius:10px;padding:9px 12px;background:#fff8f2;color:var(--ink);font:800 12px var(--sans);cursor:pointer}
+@keyframes drop{from{opacity:0;transform:translateY(-6px)}}
+/* account */
+.acct{background:var(--ink);color:#fbf6ea;border-radius:24px;padding:18px;box-shadow:var(--shadow);position:relative;overflow:hidden}
+.acct::after{content:"";position:absolute;right:-60px;top:-60px;width:200px;height:200px;border-radius:50%;background:conic-gradient(var(--btc),var(--eth),var(--up),var(--down),var(--btc));opacity:.22;filter:blur(2px)}
+.acct-top{position:relative;z-index:1;display:flex;justify-content:space-between;align-items:flex-end;gap:10px;flex-wrap:wrap}
+.lbl{font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;opacity:.65}
+.equity{font:800 clamp(36px,11vw,58px)/1 var(--mono);letter-spacing:-.05em;margin-top:4px}
+.acct-pnl{font:800 18px var(--mono)}
+.acct-pnl.pos{color:#5fe0b5!important}.acct-pnl.neg{color:#ff8a80!important}
+.acct-grid{position:relative;z-index:1;display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:16px}
+.acct-grid div{background:rgba(255,255,255,.07);border-radius:13px;padding:10px 11px;min-width:0}
+.acct-grid strong{display:block;font:800 17px var(--mono);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acct-grid .pos{color:#5fe0b5!important}.acct-grid .neg{color:#ff8a80!important}
+.acct-foot{position:relative;z-index:1;margin-top:12px;font-size:12px;opacity:.7}
+/* sections */
+.sec{margin-top:26px}
+.sec-h{display:flex;justify-content:space-between;align-items:flex-end;gap:10px;margin:0 2px 10px}
+.sec-h h2{margin:0;font-size:24px;letter-spacing:-.045em;line-height:1}
+.sec-h span{color:var(--muted);font-size:12px;text-align:right}
+.kick{font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.markets{display:grid;gap:14px}
+.mkt{background:var(--card);border-radius:22px;box-shadow:var(--shadow);overflow:hidden;border:1.5px solid var(--line)}
+.mkt[data-a=BTC]{--a:var(--btc);--aw:var(--btc-wash)}.mkt[data-a=ETH]{--a:var(--eth);--aw:var(--eth-wash)}
+.mkt-h{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 14px 12px;background:var(--aw)}
+.tok{display:flex;align-items:center;gap:10px}
+.tok i{font-style:normal;width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:var(--a);color:#fff;font-weight:800;font-size:14px}
+.tok b{display:block;font-size:19px;letter-spacing:-.03em}.tok small{color:var(--muted);font-size:12px}
+.clock{text-align:right}.clock b{display:block;font:800 22px var(--mono);color:var(--a)}.clock small{color:var(--muted);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+.bar{height:5px;background:rgba(29,26,46,.08)}.bar i{display:block;height:100%;background:var(--a);transform-origin:left;transition:transform 1s linear}
+.sides{display:grid;gap:10px;padding:12px}
+.side{border-radius:16px;padding:12px;background:#fff;border:1.5px solid var(--line)}
+.side[data-s=UP]{--s:var(--up);--sw:var(--up-wash)}.side[data-s=DOWN]{--s:var(--down);--sw:var(--down-wash)}
+.side-h{display:flex;justify-content:space-between;align-items:center}
+.stag{display:inline-block;padding:5px 10px;border-radius:8px;background:var(--s);color:#fff;font-weight:800;font-size:13px;letter-spacing:.08em}
+.fresh{font-size:11px;font-weight:700;color:var(--muted)}.fresh.no{color:#b77a00}
+.quotes{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:10px}
+.q{border-radius:12px;background:var(--sw);padding:8px 9px;min-width:0}
+.q span{display:block;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.q strong{display:block;font:800 clamp(22px,7vw,30px)/1.05 var(--mono);letter-spacing:-.04em;margin-top:2px;transition:color .4s}
+.q.mid{background:transparent;border:1.5px dashed var(--line)}
+.q.mid strong{font-size:clamp(18px,5.5vw,22px);color:var(--muted)}
+.flash-up{animation:fu .7s ease}.flash-dn{animation:fd .7s ease}
+@keyframes fu{0%{color:var(--up)}}@keyframes fd{0%{color:var(--down)}}
+.rungs{display:grid;gap:6px;margin-top:10px}
+.rung{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center;padding:9px 10px;border-radius:12px;background:#faf5ea;border:1.5px solid transparent;transition:background .3s,border-color .3s}
+.rung.filled{background:var(--sw);border-color:color-mix(in srgb,var(--s) 35%,transparent)}
+.rung.closing{background:#fff6d6;border-color:#f0d98a}
+.rp{font:800 15px var(--mono);line-height:1.1}.rp small{display:block;font-size:11px;color:var(--muted);font-weight:700}
+.rbar{min-width:0}
+.rbar .track{height:9px;border-radius:9px;background:rgba(29,26,46,.08);overflow:hidden;display:flex}
+.rbar .f{background:var(--s);transition:width .5s ease}.rbar .sd{background:var(--sun);transition:width .5s ease}
+.rbar small{display:block;margin-top:4px;font-size:12px;color:var(--muted)}.rbar small b{color:var(--ink);font-family:var(--mono)}
+.rst{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;padding:4px 7px;border-radius:7px;background:rgba(29,26,46,.07);color:var(--muted);max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rung.filled .rst{background:var(--s);color:#fff}
+.side-f{display:flex;justify-content:space-between;gap:8px;margin-top:9px;font-size:12px;color:var(--muted)}
+.side-f b{font-family:var(--mono);color:var(--ink)}
+/* lists */
+.panel{background:var(--card);border:1.5px solid var(--line);border-radius:20px;padding:14px;box-shadow:var(--shadow);min-width:0}
+.panel h3{margin:0;font-size:18px;letter-spacing:-.03em}.panel .ph{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
+.chip{font:800 12px var(--mono);padding:5px 8px;border-radius:8px;background:rgba(29,26,46,.07)}
+.list{display:grid;gap:8px}
+.scroll{max-height:460px;overflow:auto}
+.trade{display:grid;grid-template-columns:1fr auto;gap:4px 10px;padding:11px 12px;border-radius:14px;background:#fff;border-left:5px solid var(--muted)}
+.trade.win{border-left-color:var(--up)}.trade.loss{border-left-color:var(--down)}.trade.pend{border-left-color:var(--sky);background:var(--sky-wash)}
+.trade .t{font-weight:800;font-size:14px}.trade .t em{font-style:normal;font-size:11px;padding:2px 6px;border-radius:6px;margin-left:4px;color:#fff;background:var(--muted)}
+.trade .t em.UP{background:var(--up)}.trade .t em.DOWN{background:var(--down)}
+.trade .m{grid-column:1;color:var(--muted);font-size:12px}.trade .m b{color:var(--ink);font-family:var(--mono)}
+.trade .p{grid-row:1/3;grid-column:2;align-self:center;text-align:right;font:800 20px var(--mono)}
+.trade .p small{display:block;font:700 10px var(--sans);color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.ev{display:flex;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line);font-size:13px}
+.ev:last-child{border:0}.ev time{flex:none;font:700 11px var(--mono);color:var(--muted);padding-top:2px}
+.ev b{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--eth)}
+.ev p{margin:1px 0 0;overflow-wrap:anywhere}
+.empty{padding:20px 12px;text-align:center;color:var(--muted);font-size:13px;border:1.5px dashed var(--line);border-radius:14px}
+.skel{height:160px;border-radius:20px;background:linear-gradient(100deg,#efe5d2 20%,#f9f2e4 40%,#efe5d2 60%);background-size:200% 100%;animation:sh 1.4s ease-in-out infinite}
+@keyframes sh{to{background-position-x:-200%}}
+.split{display:grid;gap:14px}
+/* strategy */
+.strat{background:var(--sun);border-radius:24px;padding:18px;color:var(--ink)}
+.strat h2{margin:0 0 4px;font-size:24px;letter-spacing:-.045em}
+.ladder-vis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0}
+.ladder-vis div{background:var(--ink);color:#fbf6ea;border-radius:14px;padding:10px;text-align:center}
+.ladder-vis b{display:block;font:800 20px var(--mono)}.ladder-vis span{font-size:11px;opacity:.7;text-transform:uppercase;letter-spacing:.08em}
+.ladder-vis i{display:block;font:800 14px var(--mono);font-style:normal;color:#5fe0b5;margin-top:3px}
+.strat ol{margin:0;padding-left:20px;display:grid;gap:7px;font-size:14px}
+.strat .meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:14px}
+.strat .meta span{font-size:11px;font-weight:800;padding:6px 9px;border-radius:999px;background:rgba(29,26,46,.1)}
+footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
+.fade{animation:fin .45s ease both}@keyframes fin{from{opacity:0;transform:translateY(6px)}}
+@media(min-width:700px){
+  .shell{padding:22px 22px 48px}
+  .acct{padding:24px 26px}.acct-grid{grid-template-columns:repeat(4,1fr)}
+  .sides{grid-template-columns:1fr 1fr}
+  .split{grid-template-columns:1fr 1fr}
+}
+@media(min-width:1050px){.markets{grid-template-columns:1fr 1fr}}
+@media(prefers-reduced-motion:reduce){*,*::before{animation:none!important;transition:none!important}}
+</style>
 </head>
 <body>
-  <main class="shell">
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true">I.</div>
-        <div><div class="brand-name">Invented</div><div class="brand-caption">Paper trading cockpit</div></div>
-      </div>
-      <div class="top-status">
-        <span class="meta-pill">SIMULATION ONLY</span>
-        <span class="live-pill warn" id="statusPill">Connecting</span>
-      </div>
-    </header>
+<main class="shell">
+  <header>
+    <div class="brand"><div class="mark" aria-hidden="true">I</div><div><b>Invented</b><small>Paper ladder board</small></div></div>
+    <span class="pill warn" id="feedPill">Connecting</span>
+  </header>
 
-    <section class="hero" aria-labelledby="pageTitle">
-      <div class="hero-copy">
-        <div class="eyebrow">BTC + ETH · 5-minute paper bot</div>
-        <h1 id="pageTitle">Live pairs and results</h1>
-        <p>Four cross-pairs are monitored independently. Each entry requests 100 shares on each leg.</p>
-      </div>
-      <div class="hero-side">
-        <div class="hero-stat"><span>Markets live</span><strong id="marketLiveCount">— / 2</strong></div>
-        <div class="hero-stat"><span>Active positions</span><strong id="openPositionCount">—</strong></div>
-        <div class="hero-stat wide"><span>Current status</span><strong id="statusReason">Waiting for the first state update</strong></div>
-      </div>
-    </section>
+  <div class="banner" id="banner" role="alert">
+    <div><strong id="bannerTitle">State feed unavailable</strong><small id="bannerMsg">Retrying every second</small></div>
+    <button type="button" id="retry">Retry now</button>
+  </div>
 
-    <div class="error-banner" id="errorBanner" role="alert">
-      <div><strong>State feed unavailable</strong><small id="errorMessage">Trying to reconnect…</small></div>
-      <button class="retry" id="retryButton" type="button">Retry now</button>
+  <section class="acct" aria-label="Paper account">
+    <div class="acct-top">
+      <div><div class="lbl">Paper equity</div><div class="equity" id="equity">—</div></div>
+      <div style="text-align:right"><div class="lbl">Total P&amp;L</div><div class="acct-pnl" id="totalPnl">—</div></div>
     </div>
-
-    <section class="section" aria-label="Paper account summary">
-      <div class="section-head">
-        <div><div class="section-kicker">Paper account</div><h2>Balance &amp; performance</h2></div>
-        <div class="section-note" id="updatedAt">Waiting for update</div>
-      </div>
-      <div class="metrics">
-        <article class="metric"><div class="metric-label">Equity</div><div class="metric-value" id="equity">—</div><small class="metric-detail">Cash + marked positions</small></article>
-        <article class="metric"><div class="metric-label">Available cash</div><div class="metric-value" id="cash">—</div><small class="metric-detail" id="capitalDetail">Paper balance</small></article>
-        <article class="metric"><div class="metric-label">Realized P&amp;L</div><div class="metric-value" id="realized">—</div><small class="metric-detail">Resolved paper trades</small></article>
-        <article class="metric"><div class="metric-label">Unrealized P&amp;L</div><div class="metric-value" id="unrealized">—</div><small class="metric-detail">Current live marks</small></article>
-      </div>
-    </section>
-
-    <div class="feed-strip warn" id="feedStatus" aria-live="polite">
-      <span class="feed-dot" aria-hidden="true"></span>
-      <strong>Polymarket price feed</strong>
-      <span id="feedState">Connecting</span>
-      <span>· Latest quote <span id="feedAge">—</span></span>
+    <div class="acct-grid">
+      <div><span class="lbl">Available cash</span><strong id="avail">—</strong></div>
+      <div><span class="lbl">Reserved in bids</span><strong id="reserved">—</strong></div>
+      <div><span class="lbl">Realized</span><strong id="realized">—</strong></div>
+      <div><span class="lbl">Unrealized</span><strong id="unreal">—</strong></div>
+      <div><span class="lbl">Marked value</span><strong id="marked">—</strong></div>
+      <div><span class="lbl">Open / pending</span><strong id="counts">—</strong></div>
+      <div><span class="lbl">Fees paid</span><strong id="fees">—</strong></div>
+      <div><span class="lbl">Rebates (est.)</span><strong id="rebates">—</strong></div>
     </div>
-    <section class="section" aria-labelledby="positionsHeading">
-      <div class="section-head">
-        <div><div class="section-kicker">Live status · 100 shares per leg</div><h2 id="positionsHeading">Four cross-pairs</h2></div>
-        <div class="section-note">Current ask sum and position P&amp;L</div>
-      </div>
-      <div class="pair-grid" id="sizingGrid" aria-label="Cross-pair trades and sizing">
-        <div class="loading-card" aria-label="Loading BTC UP plus ETH DOWN"></div>
-        <div class="loading-card" aria-label="Loading ETH UP plus BTC DOWN"></div>
-        <div class="loading-card" aria-label="Loading BTC UP plus ETH UP"></div>
-        <div class="loading-card" aria-label="Loading BTC DOWN plus ETH DOWN"></div>
-      </div>
-      <p class="persistence-note" id="ledgerPersistence" aria-live="polite">Paper history storage status: checking</p>
-    </section>
+    <div class="acct-foot" id="acctFoot">Waiting for first update</div>
+  </section>
 
-    <details class="advanced-panel">
-      <summary>Performance, market detail, fill checks, and history</summary>
-      <div class="advanced-content">
-    <section class="section" aria-label="Performance">
-      <article class="panel">
-        <div class="panel-head">
-          <div><h3>Equity curve</h3><p>Paper account value through time</p></div>
-          <span class="count-chip" id="drawdown">Max DD —</span>
-        </div>
-        <div id="chartEmpty" class="chart-empty">The curve will appear as account snapshots arrive.</div>
-        <svg class="chart" id="equityChart" viewBox="0 0 720 150" role="img" aria-label="Paper account equity curve" hidden></svg>
-        <div class="strategy-meta" style="margin-top:10px">
-          <span class="meta-pill" id="winRate">Win rate —</span>
-          <span class="meta-pill" id="winsLosses">0 wins · 0 losses</span>
-        </div>
-      </article>
-    </section>
+  <section class="sec" aria-labelledby="mh">
+    <div class="sec-h"><div><div class="kick">Live CLOB · three rungs per side</div><h2 id="mh">Current windows</h2></div><span id="wsInfo">—</span></div>
+    <div class="markets" id="markets"><div class="skel"></div><div class="skel"></div></div>
+  </section>
 
-    <section class="section" aria-label="Open positions and recent orders">
-      <div class="split">
-        <article class="panel">
-          <div class="panel-head"><div><h3>All open positions</h3><p>Live marks and pending results</p></div><span class="count-chip" id="positionCount">0 positions</span></div>
-          <div class="position-list" id="positionList"><div class="empty">Loading paper positions…</div></div>
-        </article>
-        <article class="panel">
-          <div class="panel-head"><div><h3>Recent orders</h3><p>Simulated taker fills and source-book checks</p></div><span class="count-chip" id="orderCount">0 orders</span></div>
-          <div class="list-scroll" id="orderList"><div class="empty">Loading order history…</div></div>
-        </article>
-      </div>
-    </section>
+  <section class="sec split">
+    <article class="panel">
+      <div class="ph"><h3>Awaiting resolution</h3><span class="chip" id="pendCount">0</span></div>
+      <div class="list scroll" id="pending"><div class="skel" style="height:70px"></div></div>
+    </article>
+    <article class="panel">
+      <div class="ph"><h3>Closed trades</h3><span class="chip" id="closedCount">0</span></div>
+      <div class="list scroll" id="closed"><div class="skel" style="height:70px"></div></div>
+    </article>
+  </section>
 
-    <section class="section" aria-labelledby="marketsHeading">
-      <div class="section-head">
-        <div><div class="section-kicker">BTC + ETH · 5m only</div><h2 id="marketsHeading">Live market books</h2></div>
-        <div class="section-note">Combined best asks trigger each cross-pair</div>
-      </div>
-      <div class="section-note" id="marketCount">0 windows</div>
-      <div class="market-grid" id="marketGrid" aria-live="polite">
-        <div class="loading-card" aria-label="Loading markets"></div><div class="loading-card" aria-label="Loading markets"></div>
-      </div>
-    </section>
+  <section class="sec">
+    <article class="panel">
+      <div class="ph"><h3>Events</h3><span class="chip" id="evCount">0</span></div>
+      <div class="scroll" id="events"><div class="skel" style="height:70px"></div></div>
+    </article>
+  </section>
 
-    <section class="section strategy-card" aria-labelledby="strategyHeading">
-      <div class="strategy-title">
-        <div><div class="eyebrow">Strategy rules</div><h3 id="strategyHeading">Inverse-pair exits + ask-sum entries</h3></div>
-        <span class="paper-stamp">PAPER SIMULATION</span>
-      </div>
-      <div>
-        <div class="strategy-steps">
-          <div class="strategy-step"><span class="step-num">1</span><div><strong>Evaluate all four combinations independently</strong><span>BTC UP + ETH DOWN, ETH UP + BTC DOWN, BTC UP + ETH UP, and BTC DOWN + ETH DOWN can each trigger in the same 5-minute window.</span></div></div>
-          <div class="strategy-step"><span class="step-num">2</span><div><strong>Enter when combined best asks are below $0.80</strong><span>Each pair has one entry per window. Both current best asks must be fresh, and their sum must be strictly below $0.80.</span></div></div>
-          <div class="strategy-step"><span class="step-num">3</span><div><strong>Always buy 100 shares on each leg</strong><span>Paper entries assume all 100 shares fill at the current best ask, regardless of previous wins or losses, without checking ask depth. Taker fees are modeled. These simplified fills do not prove real liquidity.</span></div></div>
-          <div class="strategy-step"><span class="step-num">4</span><div><strong>Exit one pair without forcing its inverse to sell</strong><span>If this pair’s own combined asks rise strictly above $1.22, sell its remaining shares against visible bids. Its inverse enters only when its own fresh asks are below $0.80.</span></div></div>
-          <div class="strategy-step"><span class="step-num">5</span><div><strong>Keep the previous take-profit, stop, and resolution rules</strong><span>At a $0.99 best bid, count $1 per remaining share. An empty fresh bid book counts as a $0 stop. Any shares still open at window end go to official resolution.</span></div></div>
-        </div>
-        <div class="strategy-meta">
-          <span class="meta-pill">Taker entry fees included</span>
-          <span class="meta-pill">No live trading</span>
-          <span class="meta-pill" id="resolutionPolling">Checking official results —</span>
-          <span class="meta-pill" id="strategyVersion">Strategy —</span>
-        </div>
-      </div>
-    </section>
-    <section class="section" aria-label="Market activity">
-      <article class="panel">
-        <div class="panel-head"><div><h3>Market activity</h3><p>Latest strategy and feed events</p></div><span class="count-chip" id="eventCount">0 events</span></div>
-        <div class="list-scroll" id="eventList"><div class="empty">No activity yet.</div></div>
-      </article>
-    </section>
-      </div>
-    </details>
-    <footer>Paper simulation only · No real CLOB orders · History is saved in persistent Railway storage · Open shares at window end wait for official resolution</footer>
-  </main>
+  <section class="sec strat" aria-labelledby="sh">
+    <div class="kick" style="color:rgba(29,26,46,.65)">Strategy</div>
+    <h2 id="sh">Three-rung limit ladder, each side on its own</h2>
+    <div class="ladder-vis">
+      <div><span>Rung 1</span><b>0.40</b><i>TP 0.60</i></div>
+      <div><span>Rung 2</span><b>0.35</b><i>TP 0.65</i></div>
+      <div><span>Rung 3</span><b>0.30</b><i>TP 0.70</i></div>
+    </div>
+    <ol>
+      <li>BTC and ETH, UP and DOWN, each run an independent ladder of three 100-share limit bids.</li>
+      <li>Fills are partial and only as deep as the live book supports at that price.</li>
+      <li>Every filled share rests a take-profit sell at its rung's TP price.</li>
+      <li>A rung rearms only after its own take-profit has fully completed.</li>
+      <li>No stop-loss. Shares still open at expiry wait for the official resolution.</li>
+      <li>Fees are recorded as paid. Rebates are not promised and are estimated at zero.</li>
+    </ol>
+    <div class="meta"><span>Paper simulation only</span><span>No real orders</span><span id="ledgerInfo">Ledger —</span><span id="stratInfo">Strategy —</span></div>
+  </section>
+  <footer>Invented · paper trading · prices from Polymarket CLOB</footer>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const isNum = v => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
+  const usd = (v, d = 2) => isNum(v) ? (Number(v) < 0 ? '-$' : '$') + Math.abs(Number(v)).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d}) : '—';
+  const sgn = (v, d = 2) => isNum(v) ? (Number(v) > 0 ? '+' : '') + usd(v, d) : '—';
+  const px = v => isNum(v) ? '$' + Number(v).toFixed(3) : '—';
+  const px2 = v => isNum(v) ? '$' + Number(v).toFixed(2) : '—';
+  const sh = v => isNum(v) ? Number(v).toLocaleString(undefined,{maximumFractionDigits:2}) : '—';
+  const cls = v => !isNum(v) ? '' : Number(v) > 0 ? 'pos' : Number(v) < 0 ? 'neg' : 'zero';
+  const toDate = v => { if (v == null || v === '') return null; let n = Number(v); if (!Number.isFinite(n)) { const d = new Date(v); return isNaN(d) ? null : d; } if (Math.abs(n) < 1e12) n *= 1000; return new Date(n); };
+  const hm = v => { const d = toDate(v); return d ? d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}) : '—'; };
+  const hms = v => { const d = toDate(v); return d ? d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—'; };
+  const mmss = s => { if (!isNum(s)) return '—'; s = Math.max(0, Math.floor(Number(s))); return Math.floor(s/60) + ':' + String(s%60).padStart(2,'0'); };
+  const setText = (id, t, c) => { const el = $(id); el.textContent = t; if (c !== undefined) el.className = c; };
 
-  <script>
-    (() => {
-      const $ = (id) => document.getElementById(id);
-      const hasNumber = (value) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
-      const money = (value, digits = 2) => hasNumber(value)
-        ? '$' + Number(value).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })
-        : '—';
-      const shares = (value) => hasNumber(value) ? Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—';
-      const safe = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-      }[ch]));
-      const signClass = (value) => Number(value) > 0 ? 'positive' : Number(value) < 0 ? 'negative' : 'neutral';
-      const toDate = (value) => {
-        if (value === null || value === undefined || value === '') return null;
-        if (typeof value === 'string' && !/^-?\d+(\.\d+)?$/.test(value)) {
-          const parsed = new Date(value);
-          return Number.isNaN(parsed.getTime()) ? null : parsed;
-        }
-        let numeric = Number(value);
-        if (!Number.isFinite(numeric)) return null;
-        if (Math.abs(numeric) < 1e12) numeric *= 1000;
-        const parsed = new Date(numeric);
-        return Number.isNaN(parsed.getTime()) ? null : parsed;
-      };
-      const dateTime = (value) => {
-        const date = toDate(value);
-        return date ? date.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
-      };
-      const clockTime = (value) => {
-        const date = toDate(value);
-        return date ? date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : '—';
-      };
-      const elapsedTime = (start, end) => {
-        const first = Number(start);
-        const last = Number(end);
-        if (!Number.isFinite(first) || !Number.isFinite(last) || last < first) return '';
-        const seconds = Math.floor((last - first) / 1000);
-        const minutes = Math.floor(seconds / 60);
-        return minutes ? `${minutes}m ${String(seconds % 60).padStart(2, '0')}s` : `${seconds}s`;
-      };
-      const label = (value, fallback = '—') => value === null || value === undefined || value === '' ? fallback : String(value);
-      let latestState = null;
-      let requesting = false;
+  const prevPx = {};
+  let busy = false, lastOk = 0, everOk = false, timer = null;
 
-      function sideHtml(side, data) {
-        const item = data || {};
-        const orderStatus = label(item.orderStatus, 'Watching');
-        const normalized = orderStatus.toLowerCase();
-        const stateClass = normalized.includes('fill') || normalized.includes('position') ? 'filled' :
-          (normalized.includes('order') || normalized.includes('armed') || normalized.includes('trigger') ||
-           normalized.includes('ready')) ? 'armed' : '';
-        return `<section class="side-card ${side.toLowerCase()}">
-          <div class="side-head"><span class="side-name">${side}</span><span class="order-state ${stateClass}">${safe(orderStatus)}</span></div>
-          <div class="midpoint">${money(item.mid, 3)} <small>mid</small></div>
-          <div class="book-row">
-            <div class="book-cell"><span>Best bid</span><strong>${money(item.bestBid, 3)}</strong></div>
-            <div class="book-cell"><span>Best ask</span><strong>${money(item.bestAsk, 3)}</strong></div>
-          </div>
-          <div class="side-flags">
-            <span class="flag">${safe(label(item.pairLabel, 'Cross-pair leg'))}</span>
-            <span class="flag">${item.fresh ? 'Fresh quote' : 'Waiting for quote'}</span>
-          </div>
-          <div class="card-foot"><span>Pair shares <strong>${shares(item.filledShares)}</strong></span><span>Current ask <strong>${money(item.bestAsk, 3)}</strong></span></div>
-        </section>`;
-      }
+  function quote(key, label, v, extra = '') {
+    const old = prevPx[key]; prevPx[key] = v;
+    let fl = '';
+    if (isNum(old) && isNum(v) && Number(v) !== Number(old)) fl = Number(v) > Number(old) ? 'flash-up' : 'flash-dn';
+    return `<div class="q ${extra}"><span>${label}</span><strong class="num ${fl}">${px(v)}</strong></div>`;
+  }
 
-      function marketHtml(market) {
-        const asset = String(market.asset || '—').toUpperCase();
-        const timeframe = label(market.timeframe);
-        const title = label(market.title, `${asset} ${timeframe} window`);
-        const status = label(market.marketStatus, 'Waiting');
-        return `<article class="market-card" data-asset="${safe(asset)}">
-          <div class="market-card-head">
-            <div class="asset-lockup">
-              <span class="asset-token">${safe(asset.slice(0, 4))}</span>
-              <div class="asset-title"><strong>${safe(asset)} <span style="font-weight:650;color:#66736b">${safe(timeframe)}</span></strong><small title="${safe(title)}">${safe(title)}</small></div>
-            </div>
-            <span class="time-tag">${safe(status)}</span>
-          </div>
-          <div class="market-card-body">
-            <div class="market-window"><span>Window opens <strong>${safe(clockTime(market.start))}</strong></span><span>Ends <strong>${safe(clockTime(market.end))}</strong></span></div>
-            <div class="sides">${sideHtml('UP', market.sideStates?.UP)}${sideHtml('DOWN', market.sideStates?.DOWN)}</div>
-          </div>
-        </article>`;
-      }
+  function rung(r) {
+    const req = Number(r.requestedShares) || 100;
+    const filled = Number(r.filledShares) || 0, sold = Number(r.soldShares) || 0;
+    const fw = Math.min(100, Math.max(0, (filled - sold) / req * 100)), sw = Math.min(100, Math.max(0, sold / req * 100));
+    const st = String(r.status || 'idle').toLowerCase();
+    const state = filled - sold > 0 ? 'filled' : (sold > 0 ? 'closing' : '');
+    return `<div class="rung ${state}">
+      <div class="rp">${px2(r.limitPrice)}<small>TP ${px2(r.tpPrice)}</small></div>
+      <div class="rbar"><div class="track"><span class="f" style="width:${fw}%"></span><span class="sd" style="width:${sw}%"></span></div>
+        <small>Filled <b>${sh(r.filledShares)}</b> · Sold <b>${sh(r.soldShares)}</b> · Left <b>${sh(r.remainingShares)}</b>/${sh(req)}${isNum(r.cycle) ? ' · c' + esc(r.cycle) : ''}</small></div>
+      <span class="rst" title="${esc(r.status)}">${esc(st.replace(/_/g,' '))}</span></div>`;
+  }
 
-      function renderMarkets(markets) {
-        const all = Array.isArray(markets) ? markets : [];
-        const supported = all.filter((market) =>
-          ['BTC', 'ETH'].includes(String(market.asset || '').toUpperCase())
-          && String(market.timeframe || '').toLowerCase() === '5m');
-        const live = supported.filter((market) => String(market.marketStatus || '').toUpperCase() === 'OPEN').length;
-        $('marketCount').textContent = `${live} live · ${supported.length} tracked`;
-        $('marketLiveCount').textContent = `${live} / ${supported.length || 2}`;
-        $('marketGrid').innerHTML = supported.length
-          ? supported.map(marketHtml).join('')
-          : '<div class="empty">Waiting for the current BTC and ETH 5-minute markets.</div>';
-      }
+  function sideCard(m, s, positions) {
+    const q = (m.sideStates && m.sideStates[s]) || {};
+    const rs = (m.ladders && Array.isArray(m.ladders[s])) ? m.ladders[s] : [];
+    const key = m.asset + m.start + s;
+    const held = positions.filter(p => p.asset === m.asset && p.side === s && String(p.windowStart) === String(m.start) && p.status === 'OPEN');
+    const heldSh = held.reduce((a,p) => a + (Number(p.shares)||0), 0);
+    const upnl = held.reduce((a,p) => a + (Number(p.unrealizedPnl)||0), 0);
+    const age = isNum(q.ageMs) ? (Number(q.ageMs) < 1000 ? Math.round(q.ageMs) + 'ms' : (q.ageMs/1000).toFixed(1) + 's') : '—';
+    return `<div class="side" data-s="${s}">
+      <div class="side-h"><span class="stag">${s}</span><span class="fresh ${q.fresh ? '' : 'no'}">${q.fresh ? 'Fresh' : 'Stale'} · ${age}</span></div>
+      <div class="quotes">${quote(key+'b','Bid',q.bestBid)}${quote(key+'a','Ask',q.bestAsk)}${quote(key+'m','Mid',q.mid,'mid')}</div>
+      <div class="rungs">${rs.length ? rs.map(rung).join('') : '<div class="empty">No ladder for this side</div>'}</div>
+      <div class="side-f"><span>Holding <b>${sh(heldSh)}</b> sh</span><span>Open P&amp;L <b class="${held.length ? cls(upnl) : ''}">${held.length ? sgn(upnl) : '—'}</b></span></div></div>`;
+  }
 
-      function tradeStatusText(cycle, legs) {
-        const statuses = legs.map(leg => String(leg.position?.status || leg.order?.status || '').toUpperCase());
-        if (statuses.some(status => status === 'PENDING_RESOLUTION')) return 'Pending resolution';
-        if (statuses.length && statuses.every(status => [
-          'TAKE_PROFIT', 'STOP_LOSS', 'PAIR_REVERSE_EXIT', 'RESOLVED_WIN', 'RESOLVED_LOSS',
-        ].includes(status))) return statuses.every(status => ['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(status))
-          ? 'Resolved' : 'Closed';
-        return String(cycle?.status || 'OPEN').replaceAll('_', ' ');
-      }
+  function marketCard(m, positions, now) {
+    const start = toDate(m.start), end = toDate(m.end);
+    let prog = 0;
+    if (start && end && end > start) prog = Math.min(1, Math.max(0, (now - start) / (end - start)));
+    return `<article class="mkt" data-a="${esc(m.asset)}">
+      <div class="mkt-h"><div class="tok"><i>${esc(m.asset)}</i><div><b>${esc(m.asset)} ${esc(m.timeframe)}</b><small>${hm(m.start)} – ${hm(m.end)} · ${esc(m.marketStatus || '—')}</small></div></div>
+      <div class="clock"><b class="num">${mmss(m.secondsRemaining)}</b><small>left</small></div></div>
+      <div class="bar"><i style="transform:scaleX(${prog.toFixed(4)})"></i></div>
+      <div class="sides">${sideCard(m,'UP',positions)}${sideCard(m,'DOWN',positions)}</div></article>`;
+  }
 
-      function tradeLegHtml(leg) {
-        const position = leg.position || null;
-        const order = leg.order || null;
-        const side = String(leg.side || '').toUpperCase();
-        const status = String(position?.status || order?.status || 'NO_FILL').toUpperCase();
-        const isActive = ['OPEN', 'PENDING_RESOLUTION'].includes(status);
-        const pnl = isActive
-          ? (Number(position?.unrealizedPnl || 0) + Number(position?.partialRealizedPnl || 0))
-          : position?.realizedPnl;
-        let statusLabel = status.replaceAll('_', ' ');
-        let statusClass = hasNumber(pnl) ? (Number(pnl) >= 0 ? 'win' : 'loss') : '';
-        let markText = 'No position filled';
-        if (status === 'OPEN') {
-          statusLabel = hasNumber(pnl)
-            ? `Open · provisional ${Number(pnl) >= 0 ? 'profit' : 'loss'}`
-            : 'Open · waiting for mark';
-          statusClass = hasNumber(pnl) ? (Number(pnl) >= 0 ? 'win' : 'loss') : '';
-          markText = Number(position?.soldShares) > 0
-            ? `${shares(position.soldShares)} sold; retrying/holding ${shares(position.shares)} remaining`
-            : 'Watching $0.99 take-profit, empty-book stop, and inverse-pair exit';
-        } else if (status === 'PENDING_RESOLUTION') {
-          statusLabel = 'Awaiting official result';
-          const wait = elapsedTime(position?.pendingResolutionAt, latestState?.now);
-          markText = `Last pre-resolution mark · not final${wait ? ` · waiting ${wait}` : ''}`;
-        } else if (status === 'RESOLVED_WIN') markText = 'Official resolution · WON';
-        else if (status === 'RESOLVED_LOSS') markText = 'Official resolution · LOST';
-        else if (status === 'TAKE_PROFIT') markText = 'Take-profit payout · $1 per remaining share';
-        else if (status === 'STOP_LOSS') markText = 'Empty bid book · $0 stop-loss';
-        else if (status === 'PAIR_REVERSE_EXIT') markText = `Sold at average ${money(position?.exitPrice, 3)} after pair ask-sum trigger`;
-        const filled = position?.initialShares ?? order?.filledShares ?? leg.filledShares;
-        const sold = Number(position?.soldShares) || 0;
-        const requested = position?.requestedShares ?? order?.requestedShares ?? leg.requestedShares;
-        const avg = position?.entryPrice ?? order?.averagePrice ?? leg.averageEntry;
-        const total = Number(position?.initialCost ?? position?.totalCost ?? 0)
-          + Number(position?.initialFees ?? position?.fees ?? 0);
-        const priceLabel = status === 'PENDING_RESOLUTION' ? 'Last bid before resolution'
-          : ['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(status) ? 'Resolution payout'
-            : ['TAKE_PROFIT', 'STOP_LOSS', 'PAIR_REVERSE_EXIT'].includes(status) ? 'Exit price'
-              : 'Live best bid';
-        const pnlLabel = status === 'PENDING_RESOLUTION'
-          ? 'Last floating P&L'
-          : isActive ? 'Floating P&L' : 'Realized P&L';
-        return `<article class="trade-leg ${side === 'DOWN' ? 'down' : ''}">
-          <div class="trade-leg-head"><strong>${safe(label(leg.asset))} ${safe(side)}</strong><span class="trade-status ${statusClass}">${safe(statusLabel)}</span></div>
-          <div class="trade-leg-metrics">
-            <div><span>Filled / requested</span><strong>${shares(filled)} / ${shares(requested)}</strong></div>
-            <div><span>Average entry</span><strong>${money(avg, 4)}</strong></div>
-            <div><span>Cost + entry fees</span><strong>${position ? money(total, 3) : '—'}</strong></div>
-            <div><span>${isActive ? 'Sold / remaining' : 'Sold / closed'}</span><strong>${position ? `${shares(sold)} / ${shares(isActive ? position.shares : position.closedSharesAtExit)}` : '—'}</strong></div>
-            <div><span>${priceLabel}</span><strong>${money(position?.exitPrice ?? position?.markBid, 3)}</strong></div>
-            <div><span>Exit fees</span><strong>${money(position?.exitFees, 3)}</strong></div>
-          </div>
-          <div class="trade-pnl"><span>${pnlLabel}</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div>
-          ${executionAuditHtml(order?.executionAudit || null)}
-          <div class="sizing-note">${safe(markText)}${position?.resolutionMarkAt ? ` · ${safe(clockTime(position.resolutionMarkAt))}` : ''}</div>
-        </article>`;
-      }
+  function posRow(p, kind) {
+    const win = `${hm(p.windowStart)}–${hm(p.windowEnd)}`;
+    if (kind === 'pend') {
+      return `<div class="trade pend"><div class="t">${esc(p.asset)}<em class="${esc(p.side)}">${esc(p.side)}</em></div>
+        <div class="m">${win} · <b>${sh(p.shares)}</b> sh @ <b>${px2(p.entryPrice)}</b> · cost <b>${usd(p.totalCost)}</b></div>
+        <div class="p">${usd(p.totalCost)}<small>at risk</small></div></div>`;
+    }
+    const r = Number(p.realizedPnl);
+    return `<div class="trade ${r > 0 ? 'win' : r < 0 ? 'loss' : ''}"><div class="t">${esc(p.asset)}<em class="${esc(p.side)}">${esc(p.side)}</em></div>
+      <div class="m">${win} · <b>${sh(p.originalShares)}</b> sh · in <b>${px2(p.entryPrice)}</b> out <b>${px(p.exitPrice)}</b> · ${hms(p.exitAt)}</div>
+      <div class="p ${cls(p.realizedPnl)}">${sgn(p.realizedPnl)}<small>${esc(p.status || 'closed')}</small></div></div>`;
+  }
 
-      function executionAuditHtml(audit) {
-        if (!audit) return '';
-        const sourceAge = hasNumber(audit.sourceAgeMs) ? `${Math.round(Number(audit.sourceAgeMs))} ms` : 'unknown';
-        const asks = (Array.isArray(audit.asks) ? audit.asks : [])
-          .slice(0, 8)
-          .map(level => `${money(level.price, 3)} × ${shares(level.size)}`)
-          .join(' · ') || 'No ask levels recorded';
-        const available = (Array.isArray(audit.availableAsksAtSimulation) ? audit.availableAsksAtSimulation : [])
-          .slice(0, 8)
-          .map(level => `${money(level.price, 3)} × ${shares(level.size)}`)
-          .join(' · ') || 'none';
-        const fills = (Array.isArray(audit.simulatedFills) ? audit.simulatedFills : [])
-          .map(fill => `${shares(fill.shares)} @ ${money(fill.price, 3)}`)
-          .join(' · ') || 'No simulated fills';
-        return `<details class="fill-audit">
-          <summary>Paper entry assumption · ask ${money(audit.bestAsk, 3)} · quote age ${safe(sourceAge)}</summary>
-          <div class="fill-audit-content">
-            <span>Market ${safe(label(audit.marketSlug, audit.marketId))} · token ${safe(label(audit.tokenId))}</span>
-            <span>Book at entry: ${safe(asks)}</span>
-            <span>Ask depth ignored. Full-size fills at best ask are assumed, not verified against available liquidity.</span>
-            <span>Fill: ${safe(fills)} · VWAP ${money(audit.averageFillPrice, 4)} · fees ${money(audit.totalEntryFees, 4)}</span>
-          </div>
-        </details>`;
-      }
+  function render(s) {
+    const a = s.account || {};
+    const now = toDate(s.now) || new Date();
+    setText('equity', usd(a.equity));
+    const tot = isNum(a.equity) && isNum(a.initialCapital) ? a.equity - a.initialCapital : null;
+    setText('totalPnl', sgn(tot), 'acct-pnl ' + cls(tot));
+    setText('avail', usd(a.availableCash ?? a.cash));
+    setText('reserved', usd(a.reservedCash));
+    setText('realized', sgn(a.realizedPnl), cls(a.realizedPnl));
+    setText('unreal', sgn(a.unrealizedPnl), cls(a.unrealizedPnl));
+    setText('marked', usd(a.markedValue));
+    setText('counts', `${isNum(a.openPositions) ? a.openPositions : '—'} / ${isNum(a.pendingResolution) ? a.pendingResolution : '—'}`);
+    setText('fees', usd(a.totalFees));
+    setText('rebates', usd(0));
+    $('acctFoot').textContent = `Start ${usd(a.initialCapital)} · cash ${usd(a.cash)} · ${String(s.mode || 'paper').toUpperCase()} · ${s.status || '—'}${s.statusReason ? ' — ' + s.statusReason : ''}`;
 
-      function tradeCardHtml(cycle, recent = false, currentWindowStart = null) {
-        const legs = Array.isArray(cycle.legs) ? cycle.legs : [];
-        const pnlValues = legs.map(leg => ['OPEN', 'PENDING_RESOLUTION'].includes(leg.position?.status)
-          ? Number(leg.position.unrealizedPnl || 0) + Number(leg.position.partialRealizedPnl || 0)
-          : leg.position?.realizedPnl);
-        const knownPnlValues = pnlValues.filter(hasNumber);
-        const pnl = knownPnlValues.length
-          ? knownPnlValues.reduce((sum, value) => sum + Number(value), 0)
-          : cycle.realizedPnl;
-        const status = tradeStatusText(cycle, legs);
-        const statusClass = status === 'Resolved'
-          ? cycle.sizingOutcome === 'PAIR_LOSS' ? 'loss' : 'win'
-          : '';
-        const pnlLabel = status === 'Resolved' ? 'Pair realized P&L'
-          : status === 'Pending resolution' ? 'Last pair mark P&L'
-            : knownPnlValues.length < legs.length ? 'Known pair P&L' : 'Pair floating P&L';
-        const oldWindow = currentWindowStart != null &&
-          Number(cycle.windowStart) !== Number(currentWindowStart);
-        const heading = status === 'Pending resolution' ? 'Awaiting result'
-          : oldWindow ? 'Previous window entry'
-            : recent ? 'Past entry' : 'This window’s entry';
-        return `<article class="trade-card ${recent ? 'recent' : ''}">
-          <div class="trade-head">
-            <div><strong>${heading} · ${safe(dateTime(cycle.entryAt || cycle.windowStart))}</strong>
-              <small>Combined asks ${money(cycle.entryAskSum, 3)} · ${shares(cycle.sharesPerLeg)} shares requested per leg</small></div>
-            <span class="trade-status ${statusClass}">${safe(status)}</span>
-          </div>
-          <div class="trade-legs">${legs.length ? legs.map(tradeLegHtml).join('') : '<div class="trade-empty">No filled legs for this entry.</div>'}</div>
-          <div class="trade-pnl"><span>${pnlLabel}</span><strong class="${signClass(pnl)}">${money(pnl)}</strong></div>
-        </article>`;
-      }
+    const ws = s.websocket || {};
+    $('wsInfo').textContent = `Socket ${ws.connected === false ? 'down' : ws.connected ? 'up' : (ws.status || '—')} · ${hms(s.now)}`;
 
-      function renderPairCards(pairs) {
-        const list = Array.isArray(pairs) ? pairs : [];
-        $('sizingGrid').innerHTML = list.length ? list.map(pair => {
-          const id = pair.id;
-          const status = String(pair.status || 'WAITING_FOR_QUOTES').replaceAll('_', ' ');
-          const outcome = String(pair.lastOutcome || '').replaceAll('_', ' ');
-          const outcomeClass = pair.lastOutcome === 'PAIR_LOSS' ? 'loss' :
-            pair.lastOutcome ? 'win' : '';
-          const stateClass = pair.status === 'CLOSED'
-            ? pair.currentCycle?.sizingOutcome === 'PAIR_LOSS' ? 'loss' : 'active'
-            : ['ENTERED', 'ENTRY_READY', 'PENDING_RESOLUTION', 'REVERSAL_EXITING'].includes(pair.status) ? 'active' : '';
-          const current = pair.currentCycle;
-          const trades = Array.isArray(pair.trades) ? pair.trades : [];
-          const history = trades.filter(trade => trade.id !== current?.id).slice(0, 6);
-          const seconds = hasNumber(pair.secondsRemaining) ? `${Math.ceil(pair.secondsRemaining)}s left` : 'Window waiting';
-          return `<article class="pair-card" data-pair="${safe(id)}">
-            <div class="pair-head">
-              <div><h3>${safe(label(pair.label))}</h3><small>Inverse: ${safe(label(pair.inversePairLabel, '—'))} · ${safe(seconds)}</small></div>
-              <span class="pair-state ${stateClass}">${safe(status)}</span>
-            </div>
-            <div class="pair-body">
-              <div class="pair-summary">
-                <div><span>Current ask sum</span><strong>${money(pair.combinedAsk, 3)}</strong></div>
-                <div><span>Entry rule</span><strong>Below $0.800</strong></div>
-              </div>
-              <div class="pair-leg-quotes">
-                ${(pair.legs || []).map(leg => `<span class="${leg.fresh ? 'fresh' : 'stale'}">
-                  ${safe(leg.asset)} ${safe(leg.side)} <strong>${money(leg.bestAsk, 3)}</strong>
-                  <small>${leg.fresh && hasNumber(leg.quoteAgeMs) ? `${Math.max(0, Math.round(leg.quoteAgeMs))}ms` : 'waiting for fresh book'}</small>
-                </span>`).join('')}
-              </div>
-              <small class="sizing-note">${safe(label(pair.reason, 'Watching live asks'))}${hasNumber(pair.quoteSkewMs) ? ` · leg quote gap ${Math.round(pair.quoteSkewMs)}ms` : ''}</small>
-              ${current ? tradeCardHtml(current, false, pair.windowStart) : '<div class="trade-empty">No entry in this window. Waiting for the ask sum trigger.</div>'}
-              ${outcome ? `<small class="sizing-note">Previous sizing result: <strong class="${outcomeClass}">${safe(outcome)}</strong></small>` : ''}
-              ${history.length ? `<details class="trade-history"><summary>Recent trades · ${trades.length - (current ? 1 : 0)} older entries</summary><div class="trade-history-list">${history.map(trade => tradeCardHtml(trade, true, pair.windowStart)).join('')}</div></details>` : ''}
-            </div>
-          </article>`;
-        }).join('') : '<div class="empty">Waiting for the four cross-pair markets.</div>';
-      }
+    const positions = Array.isArray(s.positions) ? s.positions : [];
+    const mk = Array.isArray(s.markets) ? s.markets : [];
+    $('markets').innerHTML = mk.length ? mk.map(m => marketCard(m, positions, now)).join('') : '<div class="empty">No current BTC or ETH windows. Waiting for the next market to open.</div>';
 
-      function renderLedgerPersistence(persistence) {
-        const state = persistence || {};
-        const line = $('ledgerPersistence');
-        if (state.error) {
-          line.textContent = `History save error · ${state.error}`;
-          line.className = 'persistence-note error';
-        } else if (state.enabled && state.lastSavedAt) {
-          line.textContent = `Paper history saved · last save ${clockTime(state.lastSavedAt)}`;
-          line.className = 'persistence-note';
-        } else if (state.enabled && state.restored) {
-          line.textContent = 'Previous paper history restored · saving updates';
-          line.className = 'persistence-note';
-        } else if (state.enabled) {
-          line.textContent = 'Persistent paper-history storage is ready';
-          line.className = 'persistence-note';
-        } else {
-          line.textContent = 'Paper history persistence is not configured';
-          line.className = 'persistence-note error';
-        }
-      }
+    const curStarts = new Set(mk.map(m => m.asset + '|' + String(m.start)));
+    const pend = positions.filter(p => p.status === 'PENDING_RESOLUTION' || (p.status === 'OPEN' && !curStarts.has(p.asset + '|' + String(p.windowStart))));
+    const closed = positions.filter(p => ['TAKE_PROFIT','RESOLVED_WIN','RESOLVED_LOSS'].includes(p.status))
+      .sort((x,y) => (toDate(y.exitAt)||0) - (toDate(x.exitAt)||0));
+    setText('pendCount', pend.length, 'chip');
+    $('pending').innerHTML = pend.length ? pend.map(p => posRow(p,'pend')).join('') : '<div class="empty">Nothing waiting on official resolution.</div>';
+    setText('closedCount', closed.length, 'chip');
+    $('closed').innerHTML = closed.length ? closed.slice(0,80).map(p => posRow(p,'closed')).join('') : '<div class="empty">No closed trades yet. Take-profits and resolutions land here.</div>';
 
-      function renderPositions(positions) {
-        const list = Array.isArray(positions) ? positions : [];
-        const open = list.filter((position) => ['OPEN', 'PENDING_RESOLUTION'].includes(String(position.status || '').toUpperCase()));
-        $('positionCount').textContent = `${open.length} ${open.length === 1 ? 'position' : 'positions'}`;
-        $('openPositionCount').textContent = open.length;
-        if (!open.length) {
-          $('positionList').innerHTML = '<div class="empty">No open paper positions. Filled trades will appear here.</div>';
-          return;
-        }
-        $('positionList').innerHTML = open.map((position) => {
-          const side = String(position.side || '').toUpperCase();
-          const pnl = position.unrealizedPnl;
-          return `<article class="position-card ${side.toLowerCase()}">
-            <div class="position-top">
-              <div class="position-title"><strong>${safe(label(position.asset))} ${safe(label(position.timeframe))} · ${safe(side || '—')}</strong><small>${safe(label(position.pairLabel, position.marketTitle || 'Market'))} · ends ${safe(clockTime(position.windowEnd))}</small></div>
-              <span class="badge-side ${side === 'DOWN' ? 'down' : ''}">${safe(label(position.status))}</span>
-            </div>
-            <div class="position-values">
-              <div><span>Shares remaining</span><strong>${shares(position.shares)}</strong></div>
-              <div><span>Entry</span><strong>${money(position.entryPrice, 3)}</strong></div>
-              <div><span>Mark bid</span><strong>${money(position.markBid, 3)}</strong></div>
-            </div>
-            <div class="position-values"><div><span>Total cost</span><strong>${money(position.totalCost)}</strong></div><div><span>Mark status</span><strong>${safe(label(position.markStatus))}</strong></div></div>
-            <div class="position-pnl"><span>Total open P&amp;L</span><strong class="${signClass(Number(pnl || 0) + Number(position.partialRealizedPnl || 0))}">${money(Number(pnl || 0) + Number(position.partialRealizedPnl || 0))}</strong></div>
-          </article>`;
-        }).join('');
-      }
+    const ev = Array.isArray(s.events) ? s.events.slice(0,60) : [];
+    setText('evCount', ev.length, 'chip');
+    $('events').innerHTML = ev.length ? ev.map(e => {
+      const o = typeof e === 'object' && e ? e : { message: e };
+      return `<div class="ev"><time>${hms(o.at ?? o.time ?? o.ts ?? o.timestamp)}</time><div><b>${esc(o.type || o.kind || 'event')}</b><p>${esc(o.message ?? o.text ?? o.detail ?? '')}</p></div></div>`;
+    }).join('') : '<div class="empty">Quiet so far.</div>';
 
-      function renderOrders(orders) {
-        const list = Array.isArray(orders) ? orders : [];
-        $('orderCount').textContent = `${list.length} ${list.length === 1 ? 'order' : 'orders'}`;
-        if (!list.length) {
-          $('orderList').innerHTML = '<div class="empty">No paper orders recorded yet.</div>';
-          return;
-        }
-        $('orderList').innerHTML = list.slice(0, 40).map((order) => `<div class="activity-line">
-          <span class="activity-dot"></span>
-          <div class="activity-copy"><strong>${safe(label(order.action))} · ${safe(label(order.asset))} ${safe(label(order.timeframe))} ${safe(label(order.side))}</strong>
-            <small>${safe(clockTime(order.createdAt || order.placedAt))} · avg ${money(order.averagePrice ?? order.fillPrice, 4)} · fee ${money(order.fee ?? order.fees, 4)} · ${shares(order.filledShares)}/${shares(order.requestedShares)} shares · ends ${safe(clockTime(order.windowEnd))}</small></div>
-          <span class="activity-state">${safe(label(order.status))}</span>
-        </div>`).join('');
-      }
+    const lp = s.ledgerPersistence;
+    $('ledgerInfo').textContent = 'Ledger ' + (lp?.error ? 'save error: ' + lp.error : lp?.enabled ? 'saved ' + hms(lp.lastSavedAt) : 'not persistent');
+    const st = s.strategy;
+    $('stratInfo').textContent = 'Strategy ' + (st && typeof st === 'object' ? (st.name || st.version || 'ladder') : (st || '—'));
+  }
 
-      function renderEvents(events) {
-        const list = Array.isArray(events) ? events : [];
-        $('eventCount').textContent = `${list.length} ${list.length === 1 ? 'event' : 'events'}`;
-        if (!list.length) {
-          $('eventList').innerHTML = '<div class="empty">No strategy events yet. Watching for midpoint signals.</div>';
-          return;
-        }
-        $('eventList').innerHTML = list.slice(0, 60).map((event) => {
-          const outcome = String(event.outcome || '').toLowerCase();
-          const dotColor = outcome === 'good' ? '#176e4c' : outcome === 'bad' ? '#e66854' : '#3667ca';
-          return `<div class="activity-line">
-          <span class="activity-dot" style="background:${dotColor}"></span>
-          <div class="activity-copy"><strong>${safe(label(event.message))}</strong>
-            <small>${safe(clockTime(event.time))} · ${safe(label(event.asset))} ${safe(label(event.timeframe))} ${safe(label(event.side))}</small></div>
-          <span class="activity-state">${safe(label(event.outcome, 'Update'))}</span>
-        </div>`;
-        }).join('');
-      }
+  function setFeed(kind, text, msg) {
+    const p = $('feedPill'); p.className = 'pill ' + kind; p.textContent = text;
+    const b = $('banner');
+    if (kind === 'live') { b.className = 'banner'; return; }
+    b.className = 'banner show' + (kind === 'warn' ? ' stale' : '');
+    $('bannerTitle').textContent = kind === 'warn' ? 'Data is stale' : 'State feed unavailable';
+    $('bannerMsg').textContent = msg;
+  }
 
-      function drawEquity(points) {
-        const svg = $('equityChart');
-        const series = (Array.isArray(points) ? points : []).filter((point) => hasNumber(point?.equity));
-        if (series.length < 2) {
-          svg.hidden = true;
-          $('chartEmpty').hidden = false;
-          return;
-        }
-        const values = series.map((point) => Number(point.equity));
-        const low = Math.min(...values), high = Math.max(...values), range = Math.max(high - low, .01);
-        const width = 720, height = 140, padX = 12, padY = 12;
-        const coords = values.map((value, index) => {
-          const x = padX + (index / Math.max(1, values.length - 1)) * (width - 2 * padX);
-          const y = height - padY - ((value - low) / range) * (height - 2 * padY);
-          return [x, y];
-        });
-        const path = coords.map(([x, y], index) => `${index ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ');
-        const area = `${path} L${coords[coords.length - 1][0].toFixed(1)},${height} L${coords[0][0].toFixed(1)},${height} Z`;
-        svg.innerHTML = `<line class="chart-grid" x1="0" y1="20" x2="${width}" y2="20"></line>
-          <line class="chart-grid" x1="0" y1="75" x2="${width}" y2="75"></line>
-          <line class="chart-grid" x1="0" y1="138" x2="${width}" y2="138"></line>
-          <path class="chart-area" d="${area}"></path><path class="chart-line" d="${path}"></path>`;
-        svg.hidden = false;
-        $('chartEmpty').hidden = true;
-      }
-
-      function renderFeedStatus(state) {
-        const feed = $('feedStatus');
-        const websocket = state?.websocket || {};
-        const status = String(websocket.status || 'WAITING').toUpperCase();
-        $('feedState').textContent = status.replaceAll('_', ' ');
-        const ages = (Array.isArray(state?.markets) ? state.markets : [])
-          .flatMap(market => ['UP', 'DOWN'].map(side => market.sideStates?.[side]?.ageMs))
-          .filter(hasNumber)
-          .map(Number);
-        $('feedAge').textContent = ages.length
-          ? `${Math.round(Math.max(...ages))} ms max`
-          : 'no current quotes';
-        feed.className = `feed-strip ${
-          status === 'CONNECTED' ? 'connected' :
-          ['ERROR', 'OFFLINE', 'DISCONNECTED'].includes(status) ? 'bad' : 'warn'
-        }`;
-      }
-
-      function render(state) {
-        latestState = state || {};
-        const account = latestState.account || {};
-        const markets = Array.isArray(latestState.markets) ? latestState.markets : [];
-        const status = label(latestState.status, 'RUNNING');
-        $('statusPill').textContent = status;
-        const statusUpper = status.toUpperCase();
-        $('statusPill').className = `live-pill ${statusUpper.includes('ERROR') || statusUpper.includes('OFFLINE') ? 'bad' : statusUpper.includes('WAIT') || statusUpper.includes('CONNECT') ? 'warn' : ''}`;
-        $('statusReason').textContent = label(latestState.statusReason, 'Monitoring BTC and ETH 5-minute markets');
-        $('updatedAt').textContent = `Updated ${clockTime(latestState.now)}`;
-        renderLedgerPersistence(latestState.ledgerPersistence);
-        renderFeedStatus(latestState);
-        $('equity').textContent = money(account.equity);
-        $('cash').textContent = money(account.cash);
-        $('realized').textContent = money(account.realizedPnl);
-        $('realized').className = `metric-value ${signClass(account.realizedPnl)}`;
-        $('unrealized').textContent = money(account.unrealizedPnl);
-        $('unrealized').className = `metric-value ${signClass(account.unrealizedPnl)}`;
-        $('capitalDetail').textContent = `Initial capital ${money(account.initialCapital)}`;
-        const strategy = latestState.strategy || {};
-        const resolutionPollSeconds = Number(strategy.resolutionPollMs) / 1000;
-        $('resolutionPolling').textContent = Number.isFinite(resolutionPollSeconds) && resolutionPollSeconds > 0
-          ? `Official result checked every ${resolutionPollSeconds}s`
-          : 'Checking official results';
-        $('strategyVersion').textContent = `${label(strategy.name, 'BTC/ETH cross-pair')} · ${label(strategy.version, '—')}`;
-        $('drawdown').textContent = `Max DD ${money(account.maxDrawdown)}${hasNumber(account.maxDrawdownPercent) ? ` · ${Number(account.maxDrawdownPercent).toFixed(1)}%` : ''}`;
-        $('winRate').textContent = `Win rate ${hasNumber(account.winRate) ? `${Number(account.winRate).toFixed(1)}%` : '—'}`;
-        $('winsLosses').textContent = `${Number(account.wins) || 0} wins · ${Number(account.losses) || 0} losses`;
-        const socket = latestState.websocket || {};
-        const socketTime = socket.lastMessageAt ? ` · last book ${clockTime(socket.lastMessageAt)}` : '';
-        $('marketCount').setAttribute('title', `Feed ${label(socket.status, 'waiting')}${socketTime}`);
-        renderMarkets(markets);
-        renderPairCards(latestState.crossPairs);
-        renderPositions(latestState.positions);
-        renderOrders(latestState.orders);
-        renderEvents(latestState.events);
-        drawEquity(account.equityCurve);
-        $('errorBanner').classList.remove('visible');
-      }
-
-      async function refresh() {
-        if (requesting) return;
-        requesting = true;
-        try {
-          const response = await fetch(`/api/state?ts=${Date.now()}`, { cache: 'no-store' });
-          if (!response.ok) throw new Error(`State request failed (${response.status})`);
-          const state = await response.json();
-          render(state);
-        } catch (error) {
-          $('statusPill').textContent = 'Feed error';
-          $('statusPill').className = 'live-pill bad';
-          $('errorMessage').textContent = error instanceof Error ? error.message : 'Could not read the state feed.';
-          $('errorBanner').classList.add('visible');
-          if (!latestState) {
-            $('statusReason').textContent = 'Unable to load current state';
-            $('marketGrid').innerHTML = '<div class="empty">Market data is temporarily unavailable. The dashboard will retry automatically.</div>';
-          }
-        } finally {
-          requesting = false;
-        }
-      }
-
-      $('retryButton').addEventListener('click', refresh);
-      refresh();
-      setInterval(refresh, 1000);
-    })();
-  </script>
+  async function poll() {
+    if (busy) return;
+    busy = true;
+    const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 4000);
+    try {
+      const r = await fetch('/api/state', { cache: 'no-store', credentials: 'include', signal: ctl.signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const s = await r.json();
+      render(s);
+      lastOk = Date.now(); everOk = true;
+      const bad = /error|blocked/i.test(s.status || '');
+      bad ? setFeed('bad', 'Engine error', s.statusReason || String(s.status)) : setFeed('live', 'Live');
+    } catch (e) {
+      const age = lastOk ? Math.round((Date.now() - lastOk) / 1000) : null;
+      setFeed(everOk ? 'warn' : 'bad', everOk ? `Stale ${age}s` : 'Offline',
+        `${e.name === 'AbortError' ? 'Request timed out' : e.message}${everOk ? ` · last good update ${age}s ago` : ' · retrying every second'}`);
+      if (!everOk) ['markets','pending','closed','events'].forEach(id => { $(id).innerHTML = '<div class="empty">Could not load state. Retrying.</div>'; });
+    } finally { clearTimeout(to); busy = false; }
+  }
+  function loop() { clearTimeout(timer); poll().finally(() => { timer = setTimeout(loop, 1000); }); }
+  $('retry').addEventListener('click', loop);
+  loop();
+})();
+</script>
 </body>
 </html>
