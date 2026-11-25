@@ -223,7 +223,7 @@ class FreqAIBtcBot extends DipBounceBot {
       totalCost: cost,
       fees,
       estimatedMakerRebate: 0,
-      realizedPnl: 0,
+      realizedPnl: null,
       status: 'OPEN',
       markBid: Number.isFinite(Number(quote.bestBid)) ? Number(quote.bestBid) : null,
       markUpdatedAt: quote.updatedAt,

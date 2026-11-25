@@ -65,6 +65,7 @@ test('uses the higher FreqAI probability and buys only once per window', () => {
   assert.equal(bot.orders[0].filledShares, 50);
   assert.ok(bot.cash < 3000);
   assert.equal(bot.positions[0].status, 'OPEN');
+  assert.equal(bot.accountSnapshot().settledPositions, 0);
   assert.equal(bot.now(), now);
 });
 
