@@ -204,16 +204,19 @@ footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
     <div class="kick" style="color:rgba(29,26,46,.65)">Strategy</div>
     <h2 id="sh">Three-rung limit ladder, each side on its own</h2>
     <div class="ladder-vis">
-      <div><span>Rung 1</span><b>0.40</b><i>TP 0.90</i></div>
-      <div><span>Rung 2</span><b>0.35</b><i>TP 0.80</i></div>
-      <div><span>Rung 3</span><b>0.30</b><i>TP 0.70</i></div>
+      <div><span>Rung 1</span><b>0.40</b><i>Initial TP 0.50 · SL 0.30</i></div>
+      <div><span>Rung 2</span><b>0.35</b><i>Initial TP 0.45 · SL 0.25</i></div>
+      <div><span>Rung 3</span><b>0.30</b><i>Initial TP 0.40 · SL 0.20</i></div>
     </div>
     <ol>
-      <li>BTC and ETH, UP and DOWN, each run an independent ladder of three 100-share limit bids.</li>
+      <li>BTC and ETH, UP and DOWN, each rung starts at 100 shares and progresses independently across windows.</li>
       <li>Fills are partial and only as deep as the live book supports at that price.</li>
       <li>Every filled share rests a take-profit sell at its rung's TP price.</li>
       <li>No rearming: each rung trades once per side per window. Fresh ladders start next window.</li>
-      <li>No stop-loss. Shares still open at expiry wait for the official resolution.</li>
+      <li>After an SL, next-window TP moves $0.10 higher, up to $0.99. SL stays $0.10 below entry.</li>
+      <li>A filled $0.99 attempt that stops or expires without full TP doubles size and restarts TP at +$0.10. Any completed TP resets to 100 shares and +$0.10.</li>
+      <li>SL sweeps visible bids: gaps, partial exits and taker fees apply. Maker rebates cover passive buys and TP only.</li>
+      <li>Unfilled orders do not advance. Nonfinal expiry keeps progression unchanged. Remaining shares await resolution, which does not change the next rung settings.</li>
       <li>Maker fees are $0. Estimated rebates use each fill's price: shares × market fee rate × price × (1 − price) × assumed rebate rate. BTC rate 0.05; ETH rate 0.01. The maker rebate rate requires eligibility and may be overridden by a campaign. Estimates are not credited to equity.</li>
     </ol>
     <div class="meta"><span>Paper simulation only</span><span>No real orders</span><span id="ledgerInfo">Ledger —</span><span id="stratInfo">Strategy —</span></div>
@@ -272,9 +275,10 @@ footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
     const st = String(r.status || 'idle').toLowerCase();
     const state = filled - sold > 0 ? 'filled' : (sold > 0 ? 'closing' : '');
     return `<div class="rung ${state}">
-      <div class="rp">${px2(r.limitPrice)}<small>TP ${px2(r.tpPrice)}</small></div>
+      <div class="rp">${px2(r.limitPrice)}<small>TP ${px2(r.tpPrice)} · SL ${px2(r.slPrice)}</small></div>
       <div class="rbar"><div class="track"><span class="f" style="width:${fw}%"></span><span class="sd" style="width:${sw}%"></span></div>
-        <small>Filled <b>${sh(r.filledShares)}</b> · Sold <b>${sh(r.soldShares)}</b> · Left <b>${sh(r.remainingShares)}</b>/${sh(req)}</small></div>
+        <small>Filled <b>${sh(r.filledShares)}</b> · Sold <b>${sh(r.soldShares)}</b> · Left <b>${sh(r.remainingShares)}</b>/${sh(req)}</small>
+        <small>Next window: <b>${sh(r.nextShares)}</b> shares · TP <b>${px2(r.nextTpPrice)}</b></small></div>
       <span class="rst" title="${esc(r.status)}">${esc(st.replace(/_/g,' '))}</span></div>`;
   }
 

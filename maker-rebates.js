@@ -17,7 +17,8 @@ function summarizeMakerRebates(orders) {
     // Only executed quantities count. Cancellations, reserves and resolution
     // payouts are NOT maker fills. Order totals survive resolution and restart.
     if (order.filledShares > 0) byAsset[order.asset].buy += feeEquivalent(order.asset, order.filledShares, order.limitPrice);
-    if (order.soldShares > 0) byAsset[order.asset].sell += feeEquivalent(order.asset, order.soldShares, order.tpPrice);
+    const makerSold = order.tpSoldShares ?? order.soldShares;
+    if (makerSold > 0) byAsset[order.asset].sell += feeEquivalent(order.asset, makerSold, order.tpPrice);
   }
   const equivalent = Object.values(byAsset).reduce((sum, a) => sum + a.buy + a.sell, 0);
   return {
