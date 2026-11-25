@@ -10,7 +10,7 @@ async function restoreOrResetLedger(bot, savedLedger, strategyId) {
   if (savedLedger) {
     if (!bot.ledgerStore?.archive) throw new Error('Cannot replace the strategy without archiving the prior paper ledger.');
     await bot.ledgerStore.archive(savedLedger);
-    bot.log('Previous paper ledger archived; started a fresh ledger for the new strategy.', {
+    bot.log('Previous paper ledger archived; started independent rung ladders.', {
       type: 'LEDGER_RESET',
       now: Date.now(),
     });
@@ -27,12 +27,10 @@ async function main() {
     return;
   }
 
-  const Bot = require('./freqai-btc-bot');
+  const Bot = require('./rung-ladder-bot');
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
-  const BinanceTickFeed = require('./binance-tick-feed');
-  const FreqAIWorker = require('./freqai-worker');
   const PaperLedgerStore = require('./paper-ledger-store');
   const ledgerPath = process.env.PAPER_LEDGER_PATH || null;
   const ledgerStore = ledgerPath ? new PaperLedgerStore(ledgerPath) : null;
@@ -42,25 +40,16 @@ async function main() {
   const bot = new Bot({ ledgerStore });
   const savedLedger = ledgerStore?.load() || PaperLedgerStore.decodeBootstrap(process.env.PAPER_LEDGER_BOOTSTRAP);
   await restoreOrResetLedger(bot, savedLedger, Bot.STRATEGY.id);
-  const binanceFeed = new BinanceTickFeed();
-  const freqaiWorker = new FreqAIWorker();
-  bot.setMarketDataHelpers({ binanceFeed, freqaiWorker });
-  freqaiWorker.start();
-  void binanceFeed.start().catch((error) => {
-    console.error('[binance-feed] Could not start spot feed:', error?.message || error);
-  });
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- FreqAI-guided BTC 5-minute paper entries; no live orders are sent.');
+  console.log('MODE: DEMO -- independent BTC/ETH 5-minute rung ladders; no live orders are sent.');
 
   let stopping = false;
   const shutdown = async () => {
     if (stopping) return;
     stopping = true;
     bot.stop();
-    freqaiWorker.stop();
-    binanceFeed.stop();
     const forcedExit = setTimeout(() => process.exit(1), 10_000);
     forcedExit.unref?.();
     await bot.flushLedger();

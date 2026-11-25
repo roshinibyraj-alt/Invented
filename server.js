@@ -4,7 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'freqai-dashboard.html'));
+const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'pressure-dashboard.html'));
 function startServer(bot, port) {
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
