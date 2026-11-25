@@ -64,7 +64,7 @@
       "include_corr_pairlist": [],
       "label_period_candles": 5,
       "include_shifted_candles": 2,
-      "indicator_periods_candles": [],
+      "indicator_periods_candles": [1],
       "DI_threshold": 0,
       "weight_factor": 0.9,
       "principal_component_analysis": false,
