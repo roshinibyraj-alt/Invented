@@ -14,8 +14,10 @@
     .section-title{display:flex;justify-content:space-between;align-items:end;gap:10px;margin:23px 2px 10px}.section-title h2{font-size:22px;line-height:1.1;margin:0;letter-spacing:-.04em}.section-title span{font-size:12px;color:var(--muted);text-align:right}.model{border-color:#385584}.model-head{display:flex;justify-content:space-between;gap:10px;align-items:center}.model-name{font-weight:850;font-size:18px}.model-note{font-size:12px;color:var(--muted);margin-top:4px}.probs{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:14px}.prob{padding:14px 12px;border-radius:16px;border:1px solid var(--line);background:#0b1830}.prob.up{border-color:#197b63;background:linear-gradient(145deg,#0d322f,#10233c)}.prob.down{border-color:#8d3e58;background:linear-gradient(145deg,#361c34,#12213a)}.prob span{font-size:12px;font-weight:900;letter-spacing:.09em}.prob strong{display:block;font:900 clamp(29px,9vw,42px)/1.1 var(--mono);margin-top:4px}.bar{height:10px;background:#060f1e;border-radius:20px;overflow:hidden;margin-top:12px}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--green),var(--blue));border-radius:20px;transition:width .5s}
     .window-head{display:flex;align-items:start;justify-content:space-between;gap:10px}.window-head h2{margin:0;font-size:21px}.clock{font:850 27px var(--mono);color:var(--yellow);white-space:nowrap}.window-meta{font-size:12px;color:var(--muted);margin-top:4px}.quotes{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:13px}.quote{padding:12px;border:1px solid var(--line);background:#09162b;border-radius:14px}.quote.up{border-left:4px solid var(--green)}.quote.down{border-left:4px solid var(--red)}.quote-head{display:flex;justify-content:space-between;align-items:center;font-weight:900;letter-spacing:.06em}.quote-prices{display:flex;justify-content:space-between;gap:6px;margin-top:8px}.quote-prices div{font-size:11px;color:var(--muted)}.quote-prices b{display:block;font:800 23px var(--mono);color:var(--text)}
     .position{display:grid;grid-template-columns:1fr auto;gap:8px;background:#0a1730;border:1px solid var(--line);border-radius:15px;padding:13px;margin-top:12px}.position h3{margin:0 0 4px;font-size:16px}.position .details{font-size:12px;color:var(--muted)}.position .value{text-align:right;font:850 21px var(--mono)}.position .value small{display:block;color:var(--muted);font:750 10px var(--sans);text-transform:uppercase}.sideTag{display:inline-block;border-radius:7px;padding:3px 7px;font-size:11px;font-weight:900}.sideTag.UP{background:#12644f;color:#adffe2}.sideTag.DOWN{background:#6a2d47;color:#ffd0dc}
+    .chart-wrap{margin-top:16px;padding-top:13px;border-top:1px solid #304668}.chart-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}.chart-head strong{font-size:13px}.chart-head span,.chart-note{font-size:11px;color:var(--muted)}#equityChart{display:block;width:100%;height:auto;min-height:100px;margin-top:8px;overflow:visible}.chart-grid{stroke:#3a4d6b;stroke-width:1;stroke-dasharray:4 5}.chart-baseline{stroke:#ffd36b;stroke-width:1;stroke-dasharray:5 5}.chart-line{fill:none;stroke:#62a8ff;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.chart-area{fill:url(#equityFill)}.chart-dot{fill:#39e0a1;stroke:#091326;stroke-width:3}
     .list{display:grid;gap:8px}.row{background:#0a1730;border-radius:14px;padding:11px;border-left:4px solid var(--line);display:grid;grid-template-columns:1fr auto;gap:5px 8px}.row.win{border-color:var(--green)}.row.loss{border-color:var(--red)}.row.pending{border-color:var(--blue)}.row-title{font-weight:850}.row-detail{font-size:12px;color:var(--muted);overflow-wrap:anywhere}.row-pnl{grid-column:2;grid-row:1/3;align-self:center;text-align:right;font:800 18px var(--mono)}.empty{border:1px dashed #385070;border-radius:14px;padding:14px;text-align:center;color:var(--muted);font-size:13px}
     .events{display:grid;gap:0}.event{padding:9px 0;border-bottom:1px solid #233653}.event:last-child{border:0}.event time{color:var(--muted);font:700 11px var(--mono)}.event b{display:block;font-size:11px;color:var(--blue);text-transform:uppercase;letter-spacing:.07em}.event p{margin:2px 0 0;overflow-wrap:anywhere}
+    .audit-list{display:grid;gap:9px}.audit-row{background:#0a1730;border:1px solid #2a4165;border-radius:14px;padding:12px}.audit-top{display:flex;justify-content:space-between;align-items:start;gap:8px}.audit-score{font:800 14px var(--mono)}.audit-status{font:800 10px var(--mono);text-align:right;color:var(--yellow);overflow-wrap:anywhere}.audit-meta,.audit-book,.audit-checks{font-size:11px;color:var(--muted);line-height:1.5;margin-top:5px;overflow-wrap:anywhere}.audit-row p{font-size:12px;margin:6px 0 0;color:#e5eaf5}.audit-qualified{color:var(--green)}.audit-no{color:var(--yellow)}
     .strategy{margin-top:24px;background:linear-gradient(135deg,#162846,#252044);border:1px solid #485181;border-radius:20px;padding:16px}.strategy h2{margin:0 0 8px;font-size:21px}.strategy p{color:#d5dff1;margin:7px 0;font-size:13px}.footer{text-align:center;color:var(--muted);font-size:11px;margin-top:16px}
     @media(min-width:700px){.wrap{padding:24px 20px 50px}.stats{grid-template-columns:repeat(4,1fr)}.two{grid-template-columns:1.1fr .9fr}.model{padding:20px}.quotes{gap:12px}.panel{padding:18px}}
   </style>
@@ -34,6 +36,13 @@
       <div class="stat"><span class="label">Open P&amp;L</span><strong id="openPnl">—</strong></div>
       <div class="stat"><span class="label">Win rate</span><strong id="winRate">—</strong></div>
       <div class="stat"><span class="label">Trades / fees</span><strong id="tradesFees">—</strong></div>
+    </div>
+    <div class="chart-wrap">
+      <div class="chart-head"><strong>Equity history</strong><span id="equityRange">—</span></div>
+      <svg id="equityChart" viewBox="0 0 720 150" role="img" aria-label="Paper account equity history">
+        <text x="360" y="78" text-anchor="middle" fill="#a4b4cf" font-size="13">Waiting for saved equity samples</text>
+      </svg>
+      <div class="chart-note">Equity includes live bid marks for open positions; displayed history is retained with the paper ledger.</div>
     </div>
   </section>
   <div class="section-title"><h2>Model forecast</h2><span>BTC spot inputs · 1-minute updates</span></div>
@@ -66,6 +75,11 @@
   <section class="panel" style="margin-top:18px">
     <div class="model-head"><div class="model-name">Recent activity</div><span class="muted" id="socket">—</span></div>
     <div class="events" id="events"><div class="empty">Waiting for activity.</div></div>
+  </section>
+  <div class="section-title"><h2>Score &amp; flip audit</h2><span id="auditSummary">Waiting for model scores</span></div>
+  <section class="panel">
+    <div class="model-note">One row per FreqAI score, including held side, the strict &gt;60% flip check, and the book/execution state. Stored separately from the trading ledger.</div>
+    <div class="audit-list" id="auditTrail" style="margin-top:12px"><div class="empty">No score checks recorded yet.</div></div>
   </section>
   <section class="strategy">
     <div class="label">Strategy details</div>
@@ -100,6 +114,46 @@
     const outcome=pending?'Pending resolution':p.status==='CLOSED_FLIP'?'FLIP EXIT':p.status==='RESOLVED_WIN'?'WIN':p.status==='RESOLVED_LOSS'?'LOSS':p.status;
     return `<div class="row ${pending?'pending':Number(p.realizedPnl)>0?'win':Number(p.realizedPnl)<0?'loss':''}"><div class="row-title">${esc(p.asset)} <span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${outcome}</div><div class="row-detail">${time(p.windowStart)} · ${shares(p.originalShares||p.shares)} shares · in ${px(p.entryPrice)} · cost ${money(p.totalCost)}${pending?'':` · out ${px(p.exitPrice)} · ${time(p.exitAt)}`}</div><div class="row-pnl ${pending?'':cls(p.realizedPnl)}">${val}</div></div>`;
   }
+  function renderEquityChart(points, initialCapital, currentEquity){
+    const svg=$('equityChart');
+    const data=(Array.isArray(points)?points:[]).filter(p=>num(p.at)&&num(p.equity))
+      .sort((a,b)=>Number(a.at)-Number(b.at));
+    if(num(currentEquity)&&data.length)data[data.length-1]={...data[data.length-1],equity:Number(currentEquity)};
+    if(data.length<2){svg.innerHTML='<text x="360" y="78" text-anchor="middle" fill="#a4b4cf" font-size="13">Waiting for more equity samples</text>';$('equityRange').textContent=data.length?'1 sample':'—';return}
+    const step=Math.max(1,Math.ceil(data.length/180));
+    const sampled=data.filter((_,i)=>i===0||i===data.length-1||i%step===0);
+    const values=sampled.map(p=>Number(p.equity));
+    if(num(initialCapital))values.push(Number(initialCapital));
+    let low=Math.min(...values),high=Math.max(...values);
+    if(high-low<0.01){low-=1;high+=1}
+    const left=10,right=710,top=12,bottom=124;
+    const coords=sampled.map((p,i)=>({x:left+i/(sampled.length-1)*(right-left),y:bottom-(Number(p.equity)-low)/(high-low)*(bottom-top)}));
+    const line=coords.map((p,i)=>`${i?'L':'M'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+    const area=`${line} L${coords[coords.length-1].x.toFixed(1)},${bottom} L${coords[0].x.toFixed(1)},${bottom} Z`;
+    const baseline=num(initialCapital)?bottom-(Number(initialCapital)-low)/(high-low)*(bottom-top):null;
+    const first=money(sampled[0].equity),last=money(sampled[sampled.length-1].equity);
+    svg.innerHTML=`<defs><linearGradient id="equityFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#62a8ff" stop-opacity=".32"/><stop offset="1" stop-color="#62a8ff" stop-opacity=".02"/></linearGradient></defs><line class="chart-grid" x1="${left}" y1="${top}" x2="${right}" y2="${top}"/><line class="chart-grid" x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}"/>${baseline!==null?`<line class="chart-baseline" x1="${left}" y1="${baseline.toFixed(1)}" x2="${right}" y2="${baseline.toFixed(1)}"/>`:''}<path class="chart-area" d="${area}"/><path class="chart-line" d="${line}"/><circle class="chart-dot" cx="${coords.at(-1).x.toFixed(1)}" cy="${coords.at(-1).y.toFixed(1)}" r="5"/><text x="${left}" y="145" fill="#a4b4cf" font-size="11">${esc(first)}</text><text x="${right}" y="145" text-anchor="end" fill="#a4b4cf" font-size="11">${esc(last)}</text>`;
+    $('equityRange').textContent=`${sampled.length} points · ${time(sampled[0].at)}–${time(sampled.at(-1).at)}`;
+  }
+  function auditBook(book,label){
+    if(!book)return `${label}: no quote`;
+    return `${label} bid ${px(book.bestBid)} / ask ${px(book.bestAsk)} · ${shares(book.visibleBidShares)} bid / ${shares(book.visibleAskShares)} ask shares · ${book.fresh?'fresh':`stale ${num(book.ageMs)?Math.max(0,Number(book.ageMs))+'ms':''}`}`;
+  }
+  function auditLabel(code){
+    return ({INITIAL_SIGNAL:'Initial signal',RECOVERY_SIGNAL:'Recovery signal',HOLDING_SAME_SIDE:'Holding same side',
+      FLIP_THRESHOLD_NOT_MET:'Below the 60% flip threshold',FLIP_SIGNAL_QUALIFIED:'Flip signal qualified',
+      WAITING_FOR_HELD_BIDS:'Waiting for held-side bids',WAITING_FOR_OPPOSITE_ASKS:'Waiting for opposite-side asks',
+      WAITING_FOR_INITIAL_ASKS:'Waiting for entry asks',WAITING_FOR_RECOVERY_DEPTH:'Waiting for recovery depth',
+      WAITING_FOR_PAPER_CASH:'Waiting for paper cash',BLOCKED_INVALID_FEE:'Blocked by invalid fee data',
+      ENTRY_EXECUTED:'Entry filled',FLIP_EXECUTED:'Flip completed'})[code]||String(code||'Score recorded').replaceAll('_',' ').toLowerCase();
+  }
+  function auditCard(a){
+    const probability=a.heldSide&&a.heldSide!==a.predictedSide?a.oppositeProbability:null;
+    const flip=a.flipQualified?`QUALIFIED · ${(Number(probability)*100).toFixed(1)}% opposite`:
+      a.heldSide?`Not qualified · ${num(probability)?(Number(probability)*100).toFixed(1)+'% opposite':'same side held'}`:'No open side at score';
+    const checks=(a.checks||[]).slice(-3).reverse().map(c=>`<div>${time(c.at)} · ${esc(auditLabel(c.status))} · ${esc(c.reason||'')}</div>`).join('');
+    return `<article class="audit-row"><div class="audit-top"><div class="audit-score">${time(a.predictionAt)} · ${esc(a.predictedSide)} · UP ${(Number(a.pUp)*100).toFixed(1)}% / DOWN ${(Number(a.pDown)*100).toFixed(1)}%</div><div class="audit-status">${esc(auditLabel(a.status))}</div></div><div class="audit-meta">Window ${time(a.windowStart)} · candle ${time(a.candleStart)} · held at score ${esc(a.heldSide||'none')} · now ${esc(a.currentHeldSide||'none')} · <span class="${a.flipQualified?'audit-qualified':'audit-no'}">${esc(flip)}</span></div><div class="audit-book">${auditBook(a.heldBook,'Held book')}<br>${auditBook(a.selectedBook,'Selected book')}</div><p>${esc(a.reason||'Score recorded.')}</p><div class="audit-checks">${checks}</div></article>`;
+  }
   function render(s){
     const a=s.account||{}, f=s.freqai||{}, market=(s.markets||[]).find(m=>m.asset==='BTC'&&m.timeframe==='5m');
     $('equity').textContent=money(a.equity);
@@ -108,6 +162,7 @@
     $('cash').textContent=money(a.availableCash??a.cash);$('openPnl').textContent=signed(a.unrealizedPnl);$('openPnl').className=cls(a.unrealizedPnl);
     $('winRate').textContent=num(a.winRate)?Number(a.winRate).toFixed(1)+'%': '—';
     $('tradesFees').textContent=`${Number(a.settledPositions||0)+Number(a.openPositions||0)} · ${money(a.totalFees)}`;
+    renderEquityChart(a.equityCurve,a.initialCapital,a.equity);
     const p=f.prediction, d=s.currentDecision;
     const recovery=s.recovery||{};
     $('recovery').textContent=`Window realized P&L ${signed(recovery.windowRealizedPnl)} · recovery deficit ${money(recovery.deficit)} · resets each window`;
@@ -132,6 +187,8 @@
     $('pendingCount').textContent=pending.length;$('pending').innerHTML=pending.length?pending.slice(0,10).map(x=>row(x,true)).join(''):'<div class="empty">No positions pending.</div>';
     $('closedCount').textContent=closed.length;$('closed').innerHTML=closed.length?closed.slice(0,10).map(x=>row(x)).join(''):'<div class="empty">No resolved trades yet.</div>';
     $('events').innerHTML=(s.events||[]).slice(0,8).map(e=>`<div class="event"><time>${time(e.time)}</time><b>${esc(e.type||'Activity')}</b><p>${esc(e.message||'')}</p></div>`).join('')||'<div class="empty">No recent activity.</div>';
+    const audit=f.auditTrail||[],auditSave=f.auditPersistence||{};$('auditSummary').textContent=`${audit.length} recent scores · ${auditSave.error?'save error':auditSave.enabled?(auditSave.restored?'saved':'saving'):'not persistent'}`;
+    $('auditTrail').innerHTML=audit.length?audit.slice(0,20).map(auditCard).join(''):'<div class="empty">No score checks recorded yet.</div>';
     const ws=s.websocket||{};$('socket').textContent=`CLOB ${ws.status||'—'} · ${time(s.now)}`;
     const lp=s.ledgerPersistence||{};$('ledger').textContent='Paper ledger '+(lp.error?`save error: ${lp.error}`:lp.enabled?`saved ${time(lp.lastSavedAt)}`:'not persistent');
     $('status').textContent=s.status||'—';$('status').className='badge '+(/ERROR|BLOCKED/i.test(s.status||'')?'bad':s.status==='RUNNING'?'':'warn');

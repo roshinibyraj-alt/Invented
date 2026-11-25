@@ -7,7 +7,8 @@ const Bot = require('../freqai-btc-bot');
 function setup({ offset = 85_000, prediction = null, candle = null } = {}) {
   const start = 1_800_000_000_000;
   const now = start + offset;
-  const worker = { snapshot: () => ({ status: 'READY', lastPrediction: prediction }) };
+  let latestPrediction = prediction;
+  const worker = { snapshot: () => ({ status: 'READY', lastPrediction: latestPrediction }) };
   const binanceFeed = candle
     ? { currentCandle: { start, open: 100, close: 99, ...candle }, tickAt: now }
     : null;
@@ -35,7 +36,8 @@ function setup({ offset = 85_000, prediction = null, candle = null } = {}) {
     updatedAt: now,
     asks: [{ price: 0.40, size: 30 }, { price: 0.41, size: 25 }],
   };
-  return { bot, record, quote, now, start };
+  return { bot, record, quote, now, start, worker,
+    setPrediction(value) { latestPrediction = value; } };
 }
 
 test('uses the higher FreqAI probability and buys only once per window', () => {
@@ -67,6 +69,100 @@ test('uses the higher FreqAI probability and buys only once per window', () => {
   assert.equal(bot.positions[0].status, 'OPEN');
   assert.equal(bot.accountSnapshot().settledPositions, 0);
   assert.equal(bot.now(), now);
+});
+
+test('persists one timestamped audit row for each score and marks the initial entry', () => {
+  const { bot, record, quote, start } = setup({
+    prediction: {
+      windowStart: 1_800_000_000_000,
+      candleStart: 1_800_000_060_000,
+      candleCloseAt: 1_800_000_120_000,
+      writtenAt: 1_800_000_085_000,
+      pUp: 0.68,
+      pDown: 0.32,
+      model: 'LightGBMClassifier',
+    },
+  });
+  bot.processSide(record, 'UP', quote, 1);
+  bot.processSide(record, 'UP', { ...quote, sequence: 2 }, 2);
+  const state = bot.snapshot();
+  assert.equal(state.freqai.auditTrail.length, 1);
+  assert.equal(state.freqai.auditTrail[0].predictionAt, 1_800_000_085_000);
+  assert.equal(state.freqai.auditTrail[0].predictedSide, 'UP');
+  assert.equal(state.freqai.auditTrail[0].status, 'ENTRY_EXECUTED');
+  assert.equal(state.freqai.auditTrail[0].checks.at(-1).status, 'ENTRY_EXECUTED');
+  assert.equal(state.strategy.id, Bot.STRATEGY.id);
+  assert.equal(start, 1_800_000_000_000);
+});
+
+test('records a qualified reversal and whether its book checks allowed the flip', () => {
+  const { bot, record, quote, now, start, setPrediction } = setup({
+    prediction: {
+      windowStart: 1_800_000_000_000,
+      candleStart: 1_800_000_060_000,
+      candleCloseAt: 1_800_000_120_000,
+      writtenAt: 1_800_000_085_000,
+      pUp: 0.70,
+      pDown: 0.30,
+    },
+  });
+  bot.processSide(record, 'UP', quote, 1);
+  const heldBook = {
+    ...quote, bestBid: 0.39, bestAsk: 0.40, updatedAt: now, sequence: 2,
+    bids: [{ price: 0.39, size: 500 }],
+    asks: [{ price: 0.40, size: 500 }],
+  };
+  const oppositeBook = {
+    ...quote, bestBid: 0.59, bestAsk: 0.60, updatedAt: now, sequence: 3,
+    bids: [{ price: 0.59, size: 500 }],
+    asks: [{ price: 0.60, size: 1000 }],
+  };
+  record.quotes.UP = heldBook;
+  record.quotes.DOWN = oppositeBook;
+  setPrediction({
+    windowStart: start,
+    candleStart: start + 60_000,
+    candleCloseAt: start + 120_000,
+    writtenAt: now + 1000,
+    pUp: 0.30,
+    pDown: 0.70,
+  });
+  bot.processSide(record, 'DOWN', oppositeBook, 3);
+  const audit = bot.snapshot().freqai.auditTrail[0];
+  assert.equal(audit.flipQualified, true);
+  assert.equal(audit.heldSide, 'UP');
+  assert.equal(audit.oppositeProbability, 0.70);
+  assert.equal(audit.status, 'FLIP_EXECUTED');
+  assert.ok(audit.checks.some((check) => check.status === 'FLIP_SIGNAL_QUALIFIED'));
+  assert.equal(bot.positions.some((position) => position.status === 'CLOSED_FLIP'), true);
+});
+
+test('records a qualifying reversal blocked by unavailable held-side bids', () => {
+  const { bot, record, quote, now, start, setPrediction } = setup({
+    prediction: {
+      windowStart: 1_800_000_000_000,
+      candleStart: 1_800_000_060_000,
+      writtenAt: 1_800_000_085_000,
+      pUp: 0.70,
+      pDown: 0.30,
+    },
+  });
+  bot.processSide(record, 'UP', quote, 1);
+  record.quotes.UP = { ...quote, updatedAt: now, sequence: 2, bids: [] };
+  const oppositeBook = { ...quote, updatedAt: now, sequence: 3, asks: [{ price: 0.40, size: 500 }] };
+  record.quotes.DOWN = oppositeBook;
+  setPrediction({
+    windowStart: start,
+    candleStart: start + 60_000,
+    writtenAt: now + 1000,
+    pUp: 0.35,
+    pDown: 0.65,
+  });
+  bot.processSide(record, 'DOWN', oppositeBook, 3);
+  const audit = bot.snapshot().freqai.auditTrail[0];
+  assert.equal(audit.flipQualified, true);
+  assert.equal(audit.status, 'WAITING_FOR_HELD_BIDS');
+  assert.match(audit.reason, /fresh visible bids/);
 });
 
 test('uses a fresh Binance warm-up direction if FreqAI has no current score', () => {

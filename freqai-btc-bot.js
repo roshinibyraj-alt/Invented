@@ -23,6 +23,8 @@ const ENTRY_DELAY_MS = 80_000;
 const SHARES_PER_WINDOW = 50;
 const MAX_BUY_PRICE = 1.00;
 const FLIP_PROBABILITY = 0.60;
+const MAX_AUDIT_ROWS = 10_000;
+const MAX_AUDIT_CHECKS = 12;
 const SIDES = ['UP', 'DOWN'];
 
 function fresh(value, now, maxAgeMs) {
@@ -41,6 +43,13 @@ class FreqAIBtcBot extends DipBounceBot {
     this.modelStatus = 'WAITING_FOR_MODEL';
     this.lastDecision = null;
     this.statusReason = 'Waiting for the FreqAI model and the current BTC 5-minute market.';
+    this.flipAudit = [];
+    this.flipAuditById = new Map();
+    this.auditStore = null;
+    this.auditPersistenceState = { enabled: false, restored: false, lastSavedAt: null, error: null };
+    this.auditSaveTimer = null;
+    this.auditSaveInFlight = null;
+    this.auditDirty = false;
   }
 
   restoreLedger(ledger) {
@@ -50,6 +59,7 @@ class FreqAIBtcBot extends DipBounceBot {
         position.realizedPnl = null;
       }
     }
+    this.restoreAuditTrail(ledger?.snapshot?.freqai?.auditTrail || []);
     this.updateAccountMetrics(this.now(), true);
     this.scheduleLedgerSave();
   }
@@ -57,6 +67,205 @@ class FreqAIBtcBot extends DipBounceBot {
   setMarketDataHelpers({ binanceFeed, freqaiWorker } = {}) {
     if (binanceFeed) this.binanceFeed = binanceFeed;
     if (freqaiWorker) this.freqaiWorker = freqaiWorker;
+  }
+
+  setAuditStore(auditStore) {
+    this.auditStore = auditStore || null;
+    this.auditPersistenceState.enabled = Boolean(this.auditStore);
+  }
+
+  restoreAuditTrail(entries) {
+    const rows = Array.isArray(entries) ? entries : [];
+    this.flipAudit = rows.slice(-MAX_AUDIT_ROWS).map((row) => ({
+      ...row,
+      checks: Array.isArray(row.checks) ? row.checks.slice(-MAX_AUDIT_CHECKS) : [],
+    }));
+    this.flipAuditById = new Map(this.flipAudit.map((row) => [row.id, row]));
+    this.auditPersistenceState.restored = true;
+  }
+
+  scheduleAuditSave() {
+    if (!this.auditStore) return;
+    this.auditDirty = true;
+    if (this.auditSaveTimer) return;
+    this.auditSaveTimer = setTimeout(() => {
+      this.auditSaveTimer = null;
+      void this.flushAuditTrail();
+    }, 500);
+    this.auditSaveTimer.unref?.();
+  }
+
+  async flushAuditTrail() {
+    if (!this.auditStore) return;
+    if (this.auditSaveTimer) clearTimeout(this.auditSaveTimer);
+    this.auditSaveTimer = null;
+    if (this.auditSaveInFlight) {
+      this.auditDirty = true;
+      await this.auditSaveInFlight;
+      if (this.auditDirty) return this.flushAuditTrail();
+      return;
+    }
+    this.auditDirty = false;
+    this.auditSaveInFlight = Promise.resolve().then(() => this.auditStore.save(this.flipAudit));
+    try {
+      await this.auditSaveInFlight;
+      this.auditPersistenceState.lastSavedAt = this.now();
+      this.auditPersistenceState.error = null;
+    } catch (error) {
+      this.auditPersistenceState.error = error?.message || 'Score audit save failed.';
+      console.error('[freqai-audit] Could not persist score audit:', this.auditPersistenceState.error);
+    } finally {
+      this.auditSaveInFlight = null;
+      if (this.auditDirty) this.scheduleAuditSave();
+    }
+  }
+
+  auditBook(quote, now) {
+    const validNumber = (value) => value !== null && value !== undefined && Number.isFinite(Number(value));
+    const ageMs = validNumber(quote?.updatedAt) ? now - Number(quote.updatedAt) : null;
+    const depth = (levels) => (Array.isArray(levels) ? levels : []).reduce((sum, level) => {
+      const size = Number(level?.size);
+      return Number.isFinite(size) && size > 0 ? sum + size : sum;
+    }, 0);
+    return {
+      bestBid: validNumber(quote?.bestBid) ? Number(quote.bestBid) : null,
+      bestAsk: validNumber(quote?.bestAsk) ? Number(quote.bestAsk) : null,
+      updatedAt: validNumber(quote?.updatedAt) ? Number(quote.updatedAt) : null,
+      ageMs,
+      fresh: isFresh(quote, now),
+      visibleBidShares: depth(quote?.bids),
+      visibleAskShares: depth(quote?.asks),
+      sequence: Number.isFinite(Number(quote?.sequence)) ? Number(quote.sequence) : null,
+    };
+  }
+
+  defaultAuditStatus(decision, record, now) {
+    const marketId = String(record.market?.id || record.market?.slug || '');
+    const held = this.positions.find((position) => position.marketId === marketId
+      && position.windowStart === Number(record.market?.start) && position.status === 'OPEN');
+    const hasEntry = this.orders.some((order) => order.action === 'BUY_TAKER'
+      && order.marketId === marketId && order.windowStart === Number(record.market?.start));
+    if (!held) return hasEntry ? ['RECOVERY_SIGNAL', 'A recovery entry is being evaluated; no position is currently open.']
+      : ['INITIAL_SIGNAL', 'Initial model score recorded; waiting for the entry checks.'];
+    if (held.side === decision.side) {
+      return ['HOLDING_SAME_SIDE', `Model still selects held ${held.side}; no flip is due.`];
+    }
+    const probability = Number(decision[decision.side === 'UP' ? 'pUp' : 'pDown']);
+    if (decision.source !== 'FREQAI' || !(probability > FLIP_PROBABILITY)) {
+      return ['FLIP_THRESHOLD_NOT_MET', `Opposite score is ${(probability * 100).toFixed(1)}%; a flip requires strictly above 60%.`];
+    }
+    const bidBook = record.quotes[held.side];
+    const askBook = record.quotes[decision.side];
+    if (!isFresh(bidBook, now) || !bidBook.bids?.length) {
+      return ['WAITING_FOR_HELD_BIDS', 'Flip score qualified; waiting for fresh bids to sell the held side.'];
+    }
+    if (!isFresh(askBook, now) || !askBook.asks?.length) {
+      return ['WAITING_FOR_OPPOSITE_ASKS', 'Flip score qualified; waiting for fresh asks on the opposite side.'];
+    }
+    return ['FLIP_SIGNAL_QUALIFIED', 'Opposite score is above 60%; the execution checks are being evaluated.'];
+  }
+
+  recordPredictionAudit(decision, record, now, status, reason) {
+    if (decision?.source !== 'FREQAI' || !record.market) return null;
+    const predictionAt = Number(decision.predictionAt) || Number(decision.candleStart) || now;
+    const id = `${record.market.start}:${decision.candleStart}:${predictionAt}`;
+    let row = this.flipAuditById.get(id);
+    let isNew = false;
+    if (!row) {
+      const marketId = String(record.market.id || record.market.slug);
+      const heldAtSignal = this.positions.find((position) => position.marketId === marketId
+        && position.windowStart === Number(record.market.start) && position.status === 'OPEN');
+      const defaultStatus = this.defaultAuditStatus(decision, record, now);
+      row = {
+        id,
+        windowStart: Number(record.market.start),
+        windowEnd: Number(record.market.end),
+        marketSlug: record.market.slug || null,
+        candleStart: Number(decision.candleStart),
+        predictionAt,
+        recordedAt: now,
+        model: decision.model || 'LightGBMClassifier',
+        pUp: Number(decision.pUp),
+        pDown: Number(decision.pDown),
+        predictedSide: decision.side,
+        flipThreshold: FLIP_PROBABILITY,
+        status: status || defaultStatus[0],
+        reason: reason || defaultStatus[1],
+        heldSide: heldAtSignal?.side || null,
+        currentHeldSide: heldAtSignal?.side || null,
+        oppositeProbability: null,
+        currentOppositeProbability: null,
+        flipQualified: false,
+        selectedBook: null,
+        heldBook: null,
+        lastCheckedAt: null,
+        checks: [],
+      };
+      this.flipAudit.unshift(row);
+      this.flipAuditById.set(id, row);
+      if (this.flipAudit.length > MAX_AUDIT_ROWS) {
+        const removed = this.flipAudit.splice(MAX_AUDIT_ROWS);
+        for (const old of removed) this.flipAuditById.delete(old.id);
+      }
+      isNew = true;
+    }
+    const marketId = String(record.market.id || record.market.slug);
+    const held = this.positions.find((position) => position.marketId === marketId
+      && position.windowStart === Number(record.market.start) && position.status === 'OPEN');
+    const probability = held && held.side !== decision.side
+      ? Number(decision[decision.side === 'UP' ? 'pUp' : 'pDown']) : null;
+    const flipQualifiedNow = Boolean(held && held.side !== decision.side
+      && decision.source === 'FREQAI' && Number(probability) > FLIP_PROBABILITY);
+    row.predictedSide = decision.side;
+    row.pUp = Number(decision.pUp);
+    row.pDown = Number(decision.pDown);
+    row.currentHeldSide = held?.side || null;
+    row.currentOppositeProbability = probability;
+    if (probability != null && row.oppositeProbability == null) row.oppositeProbability = probability;
+    row.flipQualified = row.flipQualified || flipQualifiedNow;
+    row.selectedBook = this.auditBook(record.quotes[decision.side], now);
+    row.heldBook = held ? this.auditBook(record.quotes[held.side], now) : null;
+    row.lastCheckedAt = now;
+
+    const alreadyExecuted = ['ENTRY_EXECUTED', 'FLIP_EXECUTED'].includes(row.status);
+    const defaultStatus = this.defaultAuditStatus(decision, record, now);
+    const nextStatus = alreadyExecuted ? row.status
+      : status || (isNew ? row.status : defaultStatus[0]);
+    const nextReason = alreadyExecuted ? row.reason
+      : reason || (isNew ? row.reason : defaultStatus[1]);
+    const selectedSequence = row.selectedBook?.sequence ?? 'none';
+    const heldSequence = row.heldBook?.sequence ?? 'none';
+    const signature = `${nextStatus}|${selectedSequence}|${heldSequence}|${nextReason}`;
+    if (row._lastCheckSignature !== signature) {
+      row.status = nextStatus;
+      row.reason = nextReason;
+      row.checks.push({
+        at: now,
+        status: nextStatus,
+        reason: nextReason,
+        heldSide: row.heldSide,
+        currentHeldSide: row.currentHeldSide,
+        predictedSide: row.predictedSide,
+        oppositeProbability: row.oppositeProbability,
+        currentOppositeProbability: row.currentOppositeProbability,
+        flipQualified: row.flipQualified,
+        selectedBook: row.selectedBook,
+        heldBook: row.heldBook,
+      });
+      if (row.checks.length > MAX_AUDIT_CHECKS) row.checks.splice(0, row.checks.length - MAX_AUDIT_CHECKS);
+      row._lastCheckSignature = signature;
+      this.scheduleAuditSave();
+    }
+    return row;
+  }
+
+  async tick(now = this.now()) {
+    await super.tick(now);
+    const record = this.records.get('BTC:5m');
+    const decision = record?.market ? this.getDecision(record, this.now()) : null;
+    if (decision?.source === 'FREQAI' && record.marketStatus === 'OPEN') {
+      this.recordPredictionAudit(decision, record, this.now());
+    }
   }
 
   getDecision(record, now) {
@@ -77,6 +286,8 @@ class FreqAIBtcBot extends DipBounceBot {
         pDown,
         source: 'FREQAI',
         candleStart: prediction.candleStart,
+        predictionAt: Number(prediction.writtenAt) || now,
+        candleCloseAt: Number(prediction.candleCloseAt) || null,
         model: prediction.model || 'LightGBMClassifier',
       };
     }
@@ -126,6 +337,8 @@ class FreqAIBtcBot extends DipBounceBot {
       state.reason = 'Waiting for a current-window FreqAI prediction or fresh Binance warm-up direction.';
       return;
     }
+    const audit = decision.source === 'FREQAI'
+      ? this.recordPredictionAudit(decision, record, now) : null;
     this.modelStatus = decision.source === 'FREQAI' ? 'READY' : 'WARMUP_FALLBACK';
     if (decision.side !== side) {
       state.orderStatus = 'WAITING_FOR_SELECTED_SIDE_BOOK';
@@ -134,22 +347,30 @@ class FreqAIBtcBot extends DipBounceBot {
     }
 
     // Same-side predictions never add to the current holding.
-    if (held.some((p) => p.side === side)) return;
+    if (held.some((p) => p.side === side)) {
+      if (audit) this.recordPredictionAudit(decision, record, now, 'HOLDING_SAME_SIDE',
+        `Model selects held ${side}; no same-side add or flip.`);
+      return;
+    }
     if (hasEntry && (decision.source !== 'FREQAI'
       || !(Number(side === 'UP' ? decision.pUp : decision.pDown) > FLIP_PROBABILITY))) {
       state.orderStatus = 'HOLDING_UNTIL_STRONG_REVERSAL';
       state.reason = 'A flip requires an opposite fresh FreqAI probability strictly above 60%.';
+      if (audit) this.recordPredictionAudit(decision, record, now, 'FLIP_THRESHOLD_NOT_MET',
+        `Opposite score ${(Number(side === 'UP' ? decision.pUp : decision.pDown) * 100).toFixed(1)}%; threshold is strictly above 60%.`);
       return;
     }
     if (!isFresh(quote, now) || !quote.asks?.length) {
       state.orderStatus = 'WAITING_FOR_LIQUIDITY';
       state.reason = 'Waiting for fresh asks on the newly selected side.';
+      if (audit) this.recordPredictionAudit(decision, record, now, hasEntry ? 'WAITING_FOR_OPPOSITE_ASKS' : 'WAITING_FOR_INITIAL_ASKS', state.reason);
       return;
     }
     for (const position of held) {
       if (!sellForFlip(this, record, position, now)) {
         state.orderStatus = 'WAITING_FOR_FLIP_SELL';
         state.reason = 'Waiting for fresh visible bids to finish selling before the replacement buy.';
+        if (audit) this.recordPredictionAudit(decision, record, now, 'WAITING_FOR_HELD_BIDS', state.reason);
         return;
       }
     }
@@ -158,6 +379,7 @@ class FreqAIBtcBot extends DipBounceBot {
     if (!fresh(age, now, 2000) || !Array.isArray(quote.asks) || !quote.asks.length) {
       state.orderStatus = 'WAITING_FOR_LIQUIDITY';
       state.reason = `${decision.side} was selected; waiting for a fresh executable ask book.`;
+      if (audit) this.recordPredictionAudit(decision, record, now, hasEntry ? 'WAITING_FOR_OPPOSITE_ASKS' : 'WAITING_FOR_INITIAL_ASKS', state.reason);
       return;
     }
 
@@ -167,6 +389,7 @@ class FreqAIBtcBot extends DipBounceBot {
     if (feeRate == null) {
       state.orderStatus = 'BLOCKED_INVALID_FEE';
       state.reason = 'Market fee rate is invalid; no paper order was recorded.';
+      if (audit) this.recordPredictionAudit(decision, record, now, 'BLOCKED_INVALID_FEE', state.reason);
       return;
     }
     const recoveryDeficit = hasEntry ? Math.max(0, -windowNet(this, record)) : 0;
@@ -176,6 +399,7 @@ class FreqAIBtcBot extends DipBounceBot {
     if (requestedShares == null) {
       state.orderStatus = 'WAITING_FOR_RECOVERY_DEPTH';
       state.reason = `Visible asks cannot yet support a buy covering the $${recoveryDeficit.toFixed(2)} window deficit.`;
+      if (audit) this.recordPredictionAudit(decision, record, now, 'WAITING_FOR_RECOVERY_DEPTH', state.reason);
       return;
     }
 
@@ -201,12 +425,14 @@ class FreqAIBtcBot extends DipBounceBot {
     if (filledShares <= 1e-8) {
       state.orderStatus = 'WAITING_FOR_EXECUTABLE_ASKS';
       state.reason = `No visible asks at or below $${MAX_BUY_PRICE.toFixed(2)}; will retry while this window is open.`;
+      if (audit) this.recordPredictionAudit(decision, record, now, hasEntry ? 'WAITING_FOR_RECOVERY_DEPTH' : 'WAITING_FOR_INITIAL_ASKS', state.reason);
       return;
     }
     const totalCost = cost + fees;
     if (this.availableCash() + 1e-8 < totalCost) {
       state.orderStatus = 'WAITING_FOR_PAPER_CASH';
       state.reason = `Paper cash is short of the $${totalCost.toFixed(2)} entry cost.`;
+      if (audit) this.recordPredictionAudit(decision, record, now, 'WAITING_FOR_PAPER_CASH', state.reason);
       return;
     }
 
@@ -314,6 +540,9 @@ class FreqAIBtcBot extends DipBounceBot {
         now,
       },
     );
+    if (audit) this.recordPredictionAudit(decision, record, now,
+      hasEntry ? 'FLIP_EXECUTED' : 'ENTRY_EXECUTED',
+      `${hasEntry ? 'Opposite signal executed' : 'Initial entry executed'}: ${filledShares.toFixed(2)} ${side} shares filled at $${(cost / filledShares).toFixed(3)} average.`);
     this.updateAccountMetrics(now, true);
     this.scheduleLedgerSave();
   }
@@ -364,6 +593,11 @@ class FreqAIBtcBot extends DipBounceBot {
       input: 'Binance 1-minute OHLCV only; no Polymarket order-book pressure features.',
       resolutionLabel: 'Direction of the enclosing BTC 5-minute candle at its official window close.',
       warmupFallback: 'Fresh Binance spot candle direction after 80 seconds only if FreqAI has no current-window prediction.',
+      auditTrail: this.flipAudit.slice(0, 40).map(({ _lastCheckSignature, ...row }) => ({
+        ...row,
+        checks: row.checks.slice(-6),
+      })),
+      auditPersistence: { ...this.auditPersistenceState },
     };
     state.currentDecision = this.lastDecision;
     const record = this.records.get('BTC:5m');
@@ -376,6 +610,7 @@ class FreqAIBtcBot extends DipBounceBot {
     };
     return state;
   }
+
 }
 
 FreqAIBtcBot.STRATEGY = STRATEGY;

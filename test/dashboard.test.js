@@ -35,3 +35,27 @@ test('dashboard shows model probabilities, current position and resolution histo
   assert.match(e.get('events').innerHTML,/&lt;script&gt;/);
   assert.ok(e.get('events').innerHTML.indexOf('FIRST')<e.get('events').innerHTML.indexOf('SECOND'));
 });
+
+test('dashboard renders the saved equity chart and readable flip-audit checks',async()=>{
+  const e=await render({
+    now:1800000090000,
+    account:{cash:3000,equity:3020,initialCapital:3000,equityCurve:[
+      {at:1800000000000,equity:3000},{at:1800000060000,equity:3020},
+    ]},
+    freqai:{auditTrail:[{
+      predictionAt:1800000085000,windowStart:1800000000000,candleStart:1800000060000,
+      predictedSide:'DOWN',pUp:.38,pDown:.62,heldSide:'UP',oppositeProbability:.62,
+      flipQualified:true,status:'WAITING_FOR_HELD_BIDS',reason:'Waiting for fresh visible bids.',
+      selectedBook:{bestBid:.4,bestAsk:.41,visibleBidShares:100,visibleAskShares:200,fresh:true},
+      heldBook:{bestBid:null,bestAsk:.6,visibleBidShares:0,visibleAskShares:20,fresh:false,ageMs:3000},
+      checks:[{at:1800000085000,status:'FLIP_SIGNAL_QUALIFIED',reason:'Opposite score exceeds 60%.'}],
+    }],auditPersistence:{enabled:true}},
+    markets:[],positions:[],events:[],
+  });
+  assert.match(e.get('equityChart').innerHTML,/chart-line/);
+  assert.match(e.get('equityRange').textContent,/2 points/);
+  assert.match(e.get('auditTrail').innerHTML,/DOWN/);
+  assert.match(e.get('auditTrail').innerHTML,/QUALIFIED/);
+  assert.match(e.get('auditTrail').innerHTML,/Waiting for held-side bids/);
+  assert.match(e.get('auditTrail').innerHTML,/Waiting for fresh visible bids/);
+});
