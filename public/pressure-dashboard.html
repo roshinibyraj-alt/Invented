@@ -49,6 +49,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:10px;ma
 .acct-grid div{background:rgba(255,255,255,.07);border-radius:13px;padding:10px 11px;min-width:0}
 .acct-grid strong{display:block;font:800 17px var(--mono);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .acct-grid .pos{color:#5fe0b5!important}.acct-grid .neg{color:#ff8a80!important}
+.acct-grid .zero{color:#fbf6ea}
 .acct-foot{position:relative;z-index:1;margin-top:12px;font-size:12px;opacity:.7}
 /* sections */
 .sec{margin-top:26px}
@@ -74,7 +75,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:10px;ma
 .quotes{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:10px}
 .q{border-radius:12px;background:var(--sw);padding:8px 9px;min-width:0}
 .q span{display:block;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
-.q strong{display:block;font:800 clamp(22px,7vw,30px)/1.05 var(--mono);letter-spacing:-.04em;margin-top:2px;transition:color .4s}
+.q strong{display:block;font:800 clamp(20px,6vw,24px)/1.05 var(--mono);letter-spacing:-.04em;margin-top:2px;transition:color .4s;white-space:nowrap}
 .q.mid{background:transparent;border:1.5px dashed var(--line)}
 .q.mid strong{font-size:clamp(18px,5.5vw,22px);color:var(--muted)}
 .flash-up{animation:fu .7s ease}.flash-dn{animation:fd .7s ease}
@@ -131,7 +132,7 @@ footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
   .sides{grid-template-columns:1fr 1fr}
   .split{grid-template-columns:1fr 1fr}
 }
-@media(min-width:1050px){.markets{grid-template-columns:1fr 1fr}}
+@media(min-width:1050px){.markets{grid-template-columns:1fr 1fr}.sides{grid-template-columns:1fr}}
 @media(prefers-reduced-motion:reduce){*,*::before{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -232,7 +233,7 @@ footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
     const old = prevPx[key]; prevPx[key] = v;
     let fl = '';
     if (isNum(old) && isNum(v) && Number(v) !== Number(old)) fl = Number(v) > Number(old) ? 'flash-up' : 'flash-dn';
-    return `<div class="q ${extra}"><span>${label}</span><strong class="num ${fl}">${px(v)}</strong></div>`;
+    return `<div class="q ${extra}"><span>${label}</span><strong class="num ${fl}">${extra === 'mid' ? px(v) : px2(v)}</strong></div>`;
   }
 
   function rung(r) {
