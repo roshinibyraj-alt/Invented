@@ -1,44 +1,28 @@
-# Invented independent rung paper bot
+# Invented FreqAI BTC 5-minute paper bot
 
-Paper-only BTC and ETH five-minute UP/DOWN ladders. No real CLOB orders or wallet credentials are used.
+This service uses Freqtrade's FreqAI LightGBM classifier to estimate whether the current BTC 5-minute candle will close UP or DOWN. The model runs on Binance spot 1-minute OHLCV features: recent returns, candle shape, relative volume, realized volatility, and minute-in-window. It does not use Polymarket order-book pressure as a prediction feature.
 
-Each of the four outcome sides has independent limit buys, initially 100 shares:
+Freqtrade runs with `dry_run: true` and an entry/exit strategy that never submits exchange orders. It exists only to retrieve Binance candles, train/retrain the classifier, and write model probabilities to a small JSON file. The Node service reads those probabilities and remains the only component that simulates Polymarket paper trades.
 
-| Entry | Initial take-profit | Fixed stop trigger (best bid) |
-| --- | --- | --- |
-| $0.40 | $0.50 | $0.30 |
-| $0.35 | $0.45 | $0.25 |
-| $0.30 | $0.40 | $0.20 |
+## Paper execution
 
-Each asset/side/entry rung progresses independently. An SL increases its next-window TP by $0.10, capped at $0.99, with entry and SL unchanged. A filled final $0.99 attempt that hits SL or expires before full TP doubles that rung's next-window size and resets TP distance to +$0.10. A completed TP resets size to 100 and distance to +$0.10. Unfilled orders do not advance. At nonfinal expiry, progression stays unchanged; later official resolution only settles money and does not change progression. This avoids late settlements overwriting newer rung settings.
+- BTC 5-minute markets only.
+- Wait for the first 1-minute candle to close; enter no earlier than 80 seconds into a window.
+- Pick whichever model probability is higher. There is no minimum-confidence or edge filter.
+- If the model has no current-window prediction by 80 seconds, use the fresh live Binance window direction and mark the trade as a warm-up fallback.
+- Attempt one 10-share taker-style paper sweep per window, consuming visible asks through the $1.00 maximum outcome price. Partial fills and modeled taker fees are recorded; no executable liquidity means retry on the next fresh book update.
+- Hold filled shares to the exact Polymarket market's official resolution. No take-profit or stop-loss is used.
+- No live orders or wallet signing are enabled.
 
-SL is a market-style bid sweep, not a guaranteed fixed-price fill: partial exits and gaps apply. Once triggered it keeps trying to sell remaining shares on later fresh ticks; entry remainder cancels immediately. SL taker fees follow the market fee schedule (BTC fallback 0.05, ETH 0.01), with `shares * rate * price * (1-price)`. No SL rebates are estimated. At partial TP then SL, the rung follows SL progression.
-
-Orders are created when the current market is loaded after its window opens. Entry simulation uses visible asks at or below each limit, accounting at the limit price (no favorable price improvement). TP simulation uses visible bids at or above its target, accounting at the target. Only available depth fills; partial fills are possible. Higher buy limits receive depth first. Liquidity is shared across rungs and cannot be reused by repeated unchanged snapshots; only observed replenishment adds capacity.
-
-Once TP begins on a partially filled entry, its unfilled buy remainder is cancelled. After the purchased quantity has all sold at its own TP, that rung is completed and cannot rearm in that window. Each rung trades at most once per side per window; fresh ladders start next window. Cash is reserved for unfilled quantity and unfunded orders wait rather than overspend.
-
-At window end all unfilled buys cancel, while unclosed shares wait for their own exact market's official result. There is no pair exit, cross-pair signal, or blocker from earlier unresolved windows. Official resolution is checked every five seconds and pays $1/$0. Subsequent windows use each rung's saved progression. Repeated failed final attempts double risk without a user-defined cap; orders wait for sufficient actual cash rather than create credit. Numeric overflow blocks that rung instead of creating invalid orders.
-
-## Simulation limitations
-
-Depth-backed touch is not proof of exchange execution or queue priority. Visible liquidity may cancel before a real order arrives, and this paper model is not a live maker/taker matching engine. Buy/TP limit-price accounting assumes passive execution with zero taker fee; SL sweeps include taker fees. Real marketable limits may execute as takers and incur fees.
-
-### Price-dependent maker rebate estimates
-
-The dashboard estimates rebates on filled buy quantities and filled TP sell quantities using `shares × market fee rate × price × (1 − price) × assumed maker rebate rate`. The official schedule checked on 2026-11-25 uses 0.05 for BTC 5m/15m and 0.01 for other crypto, including ETH. Rates can change; see [fees](https://docs.polymarket.com/trading/fees) and [maker rebates](https://docs.polymarket.com/programs/maker-rebates).
-
-The rate selector defaults to **unverified / 0%**. Eligible tier scenarios are 3%, 7%, 10%, and 15%; campaigns can override these. This bot has no verified wallet tier or campaign. Scenarios are estimates, not confirmed income, and are excluded from cash, equity and trading P&L. Unfilled orders, cancellations and resolution payouts generate no rebate. Totals are reconstructed from the full persisted order ledger so partial fills and restarts do not duplicate rewards.
+“At least one trade per window” means the strategy does not reject a side for low predicted edge. A fill still cannot be guaranteed if Binance/Polymarket data is stale, the market is unavailable, or there are no executable asks at or below the sweep cap.
 
 ## Dashboard
 
-Phone-first dashboard with account equity/cash/reserves, large live bid/ask/mid prices, rung fill/TP progress, current shares and floating P&L, pending resolution, colored closed-trade outcomes, and strategy details at the bottom. Quotes come from the existing Polymarket CLOB WebSocket; metadata/outcomes from Gamma. Missing/stale feeds do not create fills.
+The phone-first dashboard shows paper equity, current BTC market quotes, FreqAI's UP/DOWN probabilities and readiness, the selected source (model or warm-up), open-position floating P&L, pending resolutions, colored closed trades, and recent activity. Strategy details are at the bottom.
 
-## Persistence
+## Persistence and run
 
-`PAPER_LEDGER_PATH` must point into the Railway mounted persistent volume. On the first strategy migration, the previous ledger is archived alongside the active ledger before a clean strategy ledger is saved; startup fails rather than silently overwrite it if archival fails. Subsequent restarts restore this strategy's cash, positions, orders, reservations, history, and consumed liquidity. Expired orders are not carried into new markets.
-
-## Run
+`PAPER_LEDGER_PATH` should point into the Railway persistent volume. When the strategy ID changes, the prior paper ledger is archived and a fresh ledger starts at the configured paper capital. FreqAI's user data and latest prediction are stored separately under the mounted volume so model files do not mix with the paper ledger.
 
 ```sh
 npm test

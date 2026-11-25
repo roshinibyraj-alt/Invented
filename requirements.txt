@@ -1,0 +1,1 @@
+freqtrade[freqai]==2026.10

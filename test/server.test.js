@@ -44,7 +44,7 @@ test('health endpoint reports strategy errors as unhealthy', async t => {
   assert.deepEqual(await response.json(), { ok: false, mode: 'DEMO', status: 'ERROR', now: 123 });
 });
 
-test('dashboard serves the independent rung strategy', async t => {
+test('dashboard serves the new FreqAI BTC paper strategy', async t => {
   const server = startServer({ snapshot: () => ({}) }, 0);
   await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -52,14 +52,15 @@ test('dashboard serves the independent rung strategy', async t => {
   const html = await response.text();
   assert.equal(response.status, 200);
   assert.match(html, /Invented/);
-  assert.match(html, /0\.40/);
-  assert.match(html, /0\.35/);
-  assert.match(html, /0\.30/);
-  assert.match(html, /official resolution/);
-  assert.match(html, /id="markets"/);
+  assert.match(html, /Freqtrade FreqAI/);
+  assert.match(html, /UP PROBABILITY/);
+  assert.match(html, /DOWN PROBABILITY/);
+  assert.match(html, /one paper entry per 5-minute window/i);
+  assert.match(html, /official resolution/i);
+  assert.match(html, /id="quotes"/);
   assert.match(html, /id="pending"/);
   assert.match(html, /id="closed"/);
-  assert.match(html, /id="feedPill"/);
+  assert.match(html, /id="modelStatus"/);
 });
 
 test('unknown dashboard paths still return 404', async t => {

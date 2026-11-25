@@ -219,7 +219,8 @@ class DipBounceBot {
 
   restoreLedger(ledger) {
     const snapshot = ledger?.snapshot || ledger;
-    if (!snapshot || snapshot.strategy?.id !== STRATEGY.id || !snapshot.account) {
+    const strategyId = this.strategyDefinition?.id || STRATEGY.id;
+    if (!snapshot || snapshot.strategy?.id !== strategyId || !snapshot.account) {
       throw new Error('Saved paper ledger is invalid or belongs to another strategy.');
     }
     const account = snapshot.account;
@@ -291,7 +292,7 @@ class DipBounceBot {
     snapshot.events = this.events.map((event) => ({ ...event }));
     return {
       schemaVersion: 1,
-      strategyId: STRATEGY.id,
+      strategyId: this.strategyDefinition?.id || STRATEGY.id,
       savedAt: this.now(),
       snapshot,
     };
