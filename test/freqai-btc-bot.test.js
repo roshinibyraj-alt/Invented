@@ -33,7 +33,7 @@ function setup({ offset = 85_000, prediction = null, candle = null } = {}) {
     bestBid: 0.39,
     bestAsk: 0.40,
     updatedAt: now,
-    asks: [{ price: 0.40, size: 6 }, { price: 0.41, size: 6 }],
+    asks: [{ price: 0.40, size: 30 }, { price: 0.41, size: 25 }],
   };
   return { bot, record, quote, now, start };
 }
@@ -58,11 +58,11 @@ test('uses the higher FreqAI probability and buys only once per window', () => {
   assert.equal(bot.orders.length, 1);
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].side, 'UP');
-  assert.equal(bot.positions[0].shares, 10);
+  assert.equal(bot.positions[0].shares, 50);
   assert.equal(bot.positions[0].signalSource, 'FREQAI');
   assert.equal(bot.positions[0].windowStart, start);
   assert.equal(bot.orders[0].status, 'FILLED');
-  assert.equal(bot.orders[0].filledShares, 10);
+  assert.equal(bot.orders[0].filledShares, 50);
   assert.ok(bot.cash < 3000);
   assert.equal(bot.positions[0].status, 'OPEN');
   assert.equal(bot.now(), now);
@@ -75,7 +75,7 @@ test('uses a fresh Binance warm-up direction if FreqAI has no current score', ()
   });
   quote.bestBid = 0.56;
   quote.bestAsk = 0.57;
-  quote.asks = [{ price: 0.57, size: 10 }];
+  quote.asks = [{ price: 0.57, size: 50 }];
 
   bot.processSide(record, 'DOWN', quote, 1);
 

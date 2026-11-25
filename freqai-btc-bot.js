@@ -11,14 +11,14 @@ const STRATEGY = Object.freeze({
   features: 'Binance 1-minute OHLCV return, candle shape, relative volume, volatility and minute-in-window features.',
   target: 'For each 1-minute sample, classify whether the enclosing BTC 5-minute candle closes above or below its first-minute open.',
   prediction: 'Use the higher FreqAI UP/DOWN class probability. No minimum-confidence or edge gate, so an entry is not rejected for a low score.',
-  entry: 'After the first 1-minute sample can close, take one 10-share paper marketable sweep on the model-selected side; if the model has not produced a current-window prediction by 80 seconds, use the live Binance window direction and label it as a warm-up fallback.',
+  entry: 'After the first 1-minute sample can close, take one 50-share paper marketable sweep on the model-selected side; if the model has not produced a current-window prediction by 80 seconds, use the live Binance window direction and label it as a warm-up fallback.',
   fill: 'Sweep visible Polymarket asks up to the $1.00 maximum valid outcome price, record actual depth-weighted paper fill and modeled taker fees; partial fills are recorded.',
   exit: 'Hold remaining shares until the exact market resolves; no TP or SL.',
   cadence: 'One filled entry per BTC 5-minute market window, when live feeds and executable book liquidity are available.',
 });
 
 const ENTRY_DELAY_MS = 80_000;
-const SHARES_PER_WINDOW = 10;
+const SHARES_PER_WINDOW = 50;
 const MAX_BUY_PRICE = 1.00;
 const SIDES = ['UP', 'DOWN'];
 
@@ -201,7 +201,7 @@ class FreqAIBtcBot extends DipBounceBot {
       modelProbabilityDown: decision.pDown,
       modelCandleStart: decision.candleStart,
       model: decision.model,
-      fillRule: 'Sweep fresh visible asks up to $0.99; unfilled remainder is cancelled.',
+      fillRule: `Sweep fresh visible asks up to $${MAX_BUY_PRICE.toFixed(2)}; unfilled remainder is cancelled.`,
     };
     const position = {
       id: `freqai-position-${++this.positionSequence}`,
