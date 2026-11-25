@@ -4,13 +4,13 @@ const Base = require('./dip-bounce-bot');
 const config = require('./config');
 const {summarizeMakerRebates} = require('./maker-rebates');
 const STRATEGY = {
-  id: 'btc-eth-independent-depth-ladders-wide-tp',
-  name: 'Independent rung ladders', version: '2',
+  id: 'btc-eth-independent-depth-ladders-wide-tp-once',
+  name: 'Independent rung ladders', version: '3',
   entry: 'BTC and ETH 5m UP/DOWN: 100-share limits at $0.40, $0.35 and $0.30.',
   fill: 'Depth-backed paper touch; shared liquidity is consumed once until replenished. Limit-price accounting; not guaranteed exchange fills.',
   takeProfit: 'Each rung targets $0.90, $0.80 or $0.70 respectively, with visible bid depth.',
   expiry: 'Cancel remaining buys; hold remaining shares to official resolution. No stop-loss.',
-  rearm: 'Rearm a rung only after all its purchased shares reach its own TP.',
+  rearm: 'Disabled. Each rung trades at most once per side per window; fresh ladders start next window.',
   fees: 'Passive paper fills have zero fees. Price-dependent maker rebate scenarios are shown separately; estimates are not paid income or trading equity.',
   resolutionPollMs: config.DIP_BOUNCE_RESOLUTION_POLL_MS,
 };
@@ -52,8 +52,8 @@ class RungLadderBot extends Base {
       cycle, createdAt: this.now(), positionId: null,
     };
     this.orders.unshift(order);
-    this.log(`${record.asset} ${side}: ${cycle > 1 ? 'rearmed' : 'placed'} 100 at $${limitPrice.toFixed(2)}, TP $${tpPrice.toFixed(2)}.`, {
-      asset: record.asset, side, type: cycle > 1 ? 'REARM' : 'LIMIT_PLACED',
+    this.log(`${record.asset} ${side}: placed 100 at $${limitPrice.toFixed(2)}, TP $${tpPrice.toFixed(2)}.`, {
+      asset: record.asset, side, type: 'LIMIT_PLACED',
     });
     return order;
   }
@@ -105,7 +105,7 @@ class RungLadderBot extends Base {
     const token = String(record.market.tokens[side]);
     const bids = this.capacity(token, 'bids', record.books[side].bids);
     const asks = this.capacity(token, 'asks', record.books[side].asks);
-    // Snapshot this list: a newly rearmed order cannot also fill on the same event.
+    // Completed rungs remain in the ledger and cannot trade again this window.
     const orders = this.orders.filter(o => o.marketId === marketId && o.side === side
       && ['RESTING','PARTIAL','OPEN','WAITING_FUNDS'].includes(o.status))
       .sort((a,b) => b.limitPrice - a.limitPrice || a.createdAt - b.createdAt);
@@ -134,14 +134,13 @@ class RungLadderBot extends Base {
             asset: record.asset, side, type: 'TP_FILL', outcome: 'good', now,
           });
           // Cancel the unfilled entry remainder once TP starts. Never leave a
-          // hidden live buy behind a closed/rearmed rung.
+          // hidden live buy behind a closed rung.
           order.reservedCash = 0;
           order.entryCancelled = true;
           if (p.shares <= EPS) {
             p.status = 'TAKE_PROFIT';
             p.unrealizedPnl = null;
             order.status = 'COMPLETED';
-            this.placeRung(record, side, order.limitPrice, order.tpPrice, order.cycle + 1);
             continue;
           }
         }

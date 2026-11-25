@@ -212,7 +212,7 @@ footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
       <li>BTC and ETH, UP and DOWN, each run an independent ladder of three 100-share limit bids.</li>
       <li>Fills are partial and only as deep as the live book supports at that price.</li>
       <li>Every filled share rests a take-profit sell at its rung's TP price.</li>
-      <li>A rung rearms only after its own take-profit has fully completed.</li>
+      <li>No rearming: each rung trades once per side per window. Fresh ladders start next window.</li>
       <li>No stop-loss. Shares still open at expiry wait for the official resolution.</li>
       <li>Maker fees are $0. Estimated rebates use each fill's price: shares × market fee rate × price × (1 − price) × assumed rebate rate. BTC rate 0.05; ETH rate 0.01. The maker rebate rate requires eligibility and may be overridden by a campaign. Estimates are not credited to equity.</li>
     </ol>
@@ -274,7 +274,7 @@ footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
     return `<div class="rung ${state}">
       <div class="rp">${px2(r.limitPrice)}<small>TP ${px2(r.tpPrice)}</small></div>
       <div class="rbar"><div class="track"><span class="f" style="width:${fw}%"></span><span class="sd" style="width:${sw}%"></span></div>
-        <small>Filled <b>${sh(r.filledShares)}</b> · Sold <b>${sh(r.soldShares)}</b> · Left <b>${sh(r.remainingShares)}</b>/${sh(req)}${isNum(r.cycle) ? ' · c' + esc(r.cycle) : ''}</small></div>
+        <small>Filled <b>${sh(r.filledShares)}</b> · Sold <b>${sh(r.soldShares)}</b> · Left <b>${sh(r.remainingShares)}</b>/${sh(req)}</small></div>
       <span class="rst" title="${esc(r.status)}">${esc(st.replace(/_/g,' '))}</span></div>`;
   }
 

@@ -12,7 +12,7 @@ Each of the four outcome sides has independent 100-share limit buys:
 
 Orders are created when the current market is loaded after its window opens. Entry simulation uses visible asks at or below each limit, accounting at the limit price (no favorable price improvement). TP simulation uses visible bids at or above its target, accounting at the target. Only available depth fills; partial fills are possible. Higher buy limits receive depth first. Liquidity is shared across rungs and cannot be reused by repeated unchanged snapshots; only observed replenishment adds capacity.
 
-Once TP begins on a partially filled entry, its unfilled buy remainder is cancelled. After the purchased quantity has all sold at its own TP, that rung rearms for 100 shares, repeatable until expiry. Rearming cannot buy on the same book event as the completing TP. Cash is reserved for unfilled quantity and unfunded orders wait rather than overspend.
+Once TP begins on a partially filled entry, its unfilled buy remainder is cancelled. After the purchased quantity has all sold at its own TP, that rung is completed and cannot rearm in that window. Each rung trades at most once per side per window; fresh ladders start next window. Cash is reserved for unfilled quantity and unfunded orders wait rather than overspend.
 
 At window end all unfilled buys cancel, while unclosed shares wait for their own exact market's official result. There is no stop-loss, pair exit, cross-pair signal, martingale, or blocker from earlier unresolved windows. Official resolution is checked every five seconds and pays $1/$0. Subsequent windows start independent ladders.
 

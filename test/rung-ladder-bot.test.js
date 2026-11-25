@@ -49,7 +49,7 @@ test('no fills above a rung and each side is independent', () => {
   assert.equal(bot.positions[0].shares,30);
   assert.equal(bot.cash,2988);
 });
-test('partial TP sells use visible depth; own rung rearms only after fully sold', () => {
+test('partial TP sells use visible depth; completed rung never rearms', () => {
   const {bot,tick} = fixture();
   tick(.39,.4,100);
   const p = bot.positions[0];
@@ -62,12 +62,14 @@ test('partial TP sells use visible depth; own rung rearms only after fully sold'
   tick(.9,.91,100);
   assert.equal(p.status,'TAKE_PROFIT');
   assert.ok(Math.abs(bot.cash-3050)<1e-8);
-  assert.equal(bot.orders.find(o=>o.limitPrice===.4 && o.side==='UP').cycle,2);
+  assert.equal(bot.orders.find(o=>o.limitPrice===.4 && o.side==='UP').status,'COMPLETED');
   assert.equal(bot.orders.find(o=>o.limitPrice===.4 && o.side==='UP').tpPrice,.9);
-  assert.equal(bot.positions.length,1,'new rung cannot buy on same TP event');
+  assert.equal(bot.positions.length,1);
   tick(.39,.4,100);
-  assert.equal(bot.positions.length,2);
-  assert.equal(bot.positions[0].cycle,2);
+  bot.ensureOrders(bot.records.get('BTC:5m'));
+  assert.equal(bot.positions.length,1);
+  assert.equal(bot.orders.length,6);
+  assert.equal(bot.events.filter(e=>e.type==='REARM').length,0);
 });
 test('partial entry remainder cancels when TP fills and cannot create an orphan buy', () => {
   const {bot,tick} = fixture();
@@ -98,7 +100,7 @@ test('expiry cancels buys and resolves remaining shares without stop-loss', () =
   bot.settleMarket('btc-one','UP',START+302000);
   assert.equal(bot.cash,cash,'no duplicate payout');
 });
-test('restoring preserves partial fills, liquidity consumed, reserves and rearm sequence', () => {
+test('restoring preserves partial fills, liquidity consumed and reserves', () => {
   const {bot,tick} = fixture();
   tick(.39,.4,20);
   const copy = new Bot({now:()=>START+2000});
@@ -135,7 +137,7 @@ test('rebate scenarios survive restore and exclude resolution payouts and equity
   bot.settleMarket('btc-one','UP',START+301000);
   assert.deepEqual(bot.accountSnapshot().makerRebates,a.makerRebates);
 });
-test('each rung waits for its new TP and rearms at the same new target', () => {
+test('each rung waits for its TP and stays completed for the rest of the window', () => {
   const {bot,tick} = fixture();
   tick(.28,.29,300);
   const positions = [...bot.positions];
@@ -145,9 +147,29 @@ test('each rung waits for its new TP and rearms at the same new target', () => {
   }
   for (const p of positions) {
     const current = bot.orders.find(o=>o.side==='UP' && o.limitPrice===p.entryPrice);
-    assert.equal(current.cycle,2);
+    assert.equal(current.status,'COMPLETED');
     assert.equal(current.tpPrice,p.tpPrice);
     assert.equal(p.exitPrice,p.tpPrice);
   }
   assert.ok(Math.abs(bot.cash-3135)<1e-8);
+  tick(.28,.29,1000);
+  assert.equal(bot.positions.length,3);
+  assert.equal(bot.orders.length,6);
+});
+test('completed rungs remain disabled after restore; new windows get fresh orders', () => {
+  const {bot,tick} = fixture();
+  tick(.39,.4,100);
+  tick(.9,.91,100);
+  const copy = new Bot({now:()=>START+2000});
+  copy.restoreLedger(JSON.parse(JSON.stringify(bot.exportLedger())));
+  const record=copy.records.get('BTC:5m');
+  Object.assign(record,{market:{id:'btc-one',start:START,end:START+300000,tokens:{UP:'up-one',DOWN:'down-one'}},marketStatus:'OPEN'});
+  copy.ensureOrders(record);
+  record.books.UP={bids:[{price:.39,size:100}],asks:[{price:.4,size:100}]};
+  copy.applyBook(record,'UP',record.books.UP,START+2000);
+  assert.equal(copy.positions.length,1);
+  assert.equal(copy.orders.length,6);
+  record.market={id:'btc-two',start:START+300000,end:START+600000,tokens:{UP:'up-two',DOWN:'down-two'}};
+  copy.ensureOrders(record);
+  assert.equal(copy.orders.filter(o=>o.marketId==='btc-two').length,6);
 });
