@@ -120,3 +120,25 @@ test('does not close an open position through old take-profit or stop-loss rules
 
   assert.equal(position.status, 'OPEN');
 });
+
+test('restoring an older open position does not count it as settled', () => {
+  const { bot, record, quote } = setup({
+    prediction: {
+      windowStart: 1_800_000_000_000,
+      candleStart: 1_800_000_060_000,
+      candleCloseAt: 1_800_000_120_000,
+      pUp: 0.6,
+      pDown: 0.4,
+    },
+  });
+  bot.processSide(record, 'UP', quote, 1);
+  const ledger = bot.exportLedger();
+  ledger.snapshot.positions[0].realizedPnl = 0;
+
+  const restored = new Bot({ now: () => bot.now(), initialCapital: 3000, marketData: {} });
+  restored.restoreLedger(ledger);
+
+  assert.equal(restored.positions[0].status, 'OPEN');
+  assert.equal(restored.positions[0].realizedPnl, null);
+  assert.equal(restored.accountSnapshot().settledPositions, 0);
+});

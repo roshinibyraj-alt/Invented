@@ -40,6 +40,17 @@ class FreqAIBtcBot extends DipBounceBot {
     this.statusReason = 'Waiting for the FreqAI model and the current BTC 5-minute market.';
   }
 
+  restoreLedger(ledger) {
+    super.restoreLedger(ledger);
+    for (const position of this.positions) {
+      if (position.status === 'OPEN' || position.status === 'PENDING_RESOLUTION') {
+        position.realizedPnl = null;
+      }
+    }
+    this.updateAccountMetrics(this.now(), true);
+    this.scheduleLedgerSave();
+  }
+
   setMarketDataHelpers({ binanceFeed, freqaiWorker } = {}) {
     if (binanceFeed) this.binanceFeed = binanceFeed;
     if (freqaiWorker) this.freqaiWorker = freqaiWorker;
