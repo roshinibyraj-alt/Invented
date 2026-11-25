@@ -115,3 +115,19 @@ test('insufficient funds never overspend or reserve imaginary cash', () => {
   assert.ok(bot.availableCash()>=0);
   assert.equal(bot.positions.reduce((s,p)=>s+p.totalCost,0),40);
 });
+test('rebate scenarios survive restore and exclude resolution payouts and equity', () => {
+  const {bot,record,tick,setNow} = fixture();
+  tick(.39,.4,100);
+  tick(.6,.61,30);
+  const a = bot.accountSnapshot();
+  assert.ok(Math.abs(a.makerRebates.feeEquivalent-1.56)<1e-8);
+  assert.equal(a.totalFees,0);
+  assert.equal(a.totalRebates,0);
+  const copy = new Bot({now:()=>START+2000});
+  copy.restoreLedger(JSON.parse(JSON.stringify(bot.exportLedger())));
+  assert.deepEqual(copy.accountSnapshot().makerRebates,a.makerRebates);
+  setNow(START+300000);
+  bot.expireMarket(record,START+300000);
+  bot.settleMarket('btc-one','UP',START+301000);
+  assert.deepEqual(bot.accountSnapshot().makerRebates,a.makerRebates);
+});

@@ -18,7 +18,13 @@ At window end all unfilled buys cancel, while unclosed shares wait for their own
 
 ## Simulation limitations
 
-Depth-backed touch is not proof of exchange execution or queue priority. Visible liquidity may cancel before a real order arrives, and this paper model is not a live maker/taker matching engine. Limit-price accounting assumes passive execution with zero taker fee. It does not invent maker rebates: estimated rebates remain zero until a verified payment exists. Real marketable limits may execute as takers and incur fees.
+Depth-backed touch is not proof of exchange execution or queue priority. Visible liquidity may cancel before a real order arrives, and this paper model is not a live maker/taker matching engine. Limit-price accounting assumes passive execution with zero taker fee. Real marketable limits may execute as takers and incur fees.
+
+### Price-dependent maker rebate estimates
+
+The dashboard estimates rebates on filled buy quantities and filled TP sell quantities using `shares × market fee rate × price × (1 − price) × assumed maker rebate rate`. The official schedule checked on 2026-11-25 uses 0.05 for BTC 5m/15m and 0.01 for other crypto, including ETH. Rates can change; see [fees](https://docs.polymarket.com/trading/fees) and [maker rebates](https://docs.polymarket.com/programs/maker-rebates).
+
+The rate selector defaults to **unverified / 0%**. Eligible tier scenarios are 3%, 7%, 10%, and 15%; campaigns can override these. This bot has no verified wallet tier or campaign. Scenarios are estimates, not confirmed income, and are excluded from cash, equity and trading P&L. Unfilled orders, cancellations and resolution payouts generate no rebate. Totals are reconstructed from the full persisted order ledger so partial fills and restarts do not duplicate rewards.
 
 ## Dashboard
 

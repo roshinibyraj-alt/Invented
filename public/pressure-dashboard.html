@@ -161,7 +161,18 @@ footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
       <div><span class="lbl">Marked value</span><strong id="marked">—</strong></div>
       <div><span class="lbl">Open / pending</span><strong id="counts">—</strong></div>
       <div><span class="lbl">Fees paid</span><strong id="fees">—</strong></div>
-      <div><span class="lbl">Rebates (est.)</span><strong id="rebates">—</strong></div>
+      <div><span class="lbl">Rebates (paper estimate)</span><strong id="rebates">—</strong></div>
+    </div>
+    <div class="acct-foot">
+      <label for="rebateRate">Assumed maker rebate rate</label>
+      <select id="rebateRate" style="font:inherit;max-width:100%;padding:6px;border-radius:8px">
+        <option value="0">Unverified / 0%</option>
+        <option value="0.03">3% if eligible</option>
+        <option value="0.07">7% if eligible</option>
+        <option value="0.10">10% if eligible</option>
+        <option value="0.15">15% if eligible</option>
+      </select>
+      <div id="rebateDetail">Calculated from filled buys and TP sells. Not included in equity.</div>
     </div>
     <div class="acct-foot" id="acctFoot">Waiting for first update</div>
   </section>
@@ -203,7 +214,7 @@ footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
       <li>Every filled share rests a take-profit sell at its rung's TP price.</li>
       <li>A rung rearms only after its own take-profit has fully completed.</li>
       <li>No stop-loss. Shares still open at expiry wait for the official resolution.</li>
-      <li>Fees are recorded as paid. Rebates are not promised and are estimated at zero.</li>
+      <li>Maker fees are $0. Estimated rebates use each fill's price: shares × market fee rate × price × (1 − price) × assumed rebate rate. BTC rate 0.05; ETH rate 0.01. The maker rebate rate requires eligibility and may be overridden by a campaign. Estimates are not credited to equity.</li>
     </ol>
     <div class="meta"><span>Paper simulation only</span><span>No real orders</span><span id="ledgerInfo">Ledger —</span><span id="stratInfo">Strategy —</span></div>
   </section>
@@ -212,6 +223,24 @@ footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
 <script>
 (() => {
   const $ = id => document.getElementById(id);
+  let latestRebateModel = null;
+  function renderRebates() {
+    const rate = Number($('rebateRate').value);
+    const model = latestRebateModel;
+    const amount = model?.scenarios?.find(s => Math.abs(s.rate - rate) < 1e-8)?.amount;
+    $('rebates').textContent = typeof amount === 'number' ? '$' + amount.toFixed(4) : '—';
+    $('rebateDetail').textContent = model
+      ? `Filled-trade fee equivalent $${model.feeEquivalent.toFixed(4)} · ${(rate * 100).toFixed(0)}% assumed · received $${model.actualReceived.toFixed(2)} · excluded from equity. Eligibility unverified.`
+      : 'Waiting for rebate calculation.';
+  }
+  $('rebateRate').addEventListener('change', () => {
+    try { localStorage.setItem('invented-maker-rebate-rate', $('rebateRate').value); } catch {}
+    renderRebates();
+  });
+  try {
+    const saved = localStorage.getItem('invented-maker-rebate-rate');
+    if (['0','0.03','0.07','0.10','0.15'].includes(saved)) $('rebateRate').value = saved;
+  } catch {}
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const isNum = v => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
   const usd = (v, d = 2) => isNum(v) ? (Number(v) < 0 ? '-$' : '$') + Math.abs(Number(v)).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d}) : '—';
@@ -301,7 +330,8 @@ footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
     setText('marked', usd(a.markedValue));
     setText('counts', `${isNum(a.openPositions) ? a.openPositions : '—'} / ${isNum(a.pendingResolution) ? a.pendingResolution : '—'}`);
     setText('fees', usd(a.totalFees));
-    setText('rebates', usd(0));
+    latestRebateModel = a.makerRebates || null;
+    renderRebates();
     $('acctFoot').textContent = `Start ${usd(a.initialCapital)} · cash ${usd(a.cash)} · ${String(s.mode || 'paper').toUpperCase()} · ${s.status || '—'}${s.statusReason ? ' — ' + s.statusReason : ''}`;
 
     const ws = s.websocket || {};

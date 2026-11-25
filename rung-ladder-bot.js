@@ -2,6 +2,7 @@
 
 const Base = require('./dip-bounce-bot');
 const config = require('./config');
+const {summarizeMakerRebates} = require('./maker-rebates');
 const STRATEGY = {
   id: 'btc-eth-independent-depth-ladders',
   name: 'Independent rung ladders', version: '1',
@@ -10,7 +11,7 @@ const STRATEGY = {
   takeProfit: 'Each rung targets $0.60, $0.65 or $0.70 respectively, with visible bid depth.',
   expiry: 'Cancel remaining buys; hold remaining shares to official resolution. No stop-loss.',
   rearm: 'Rearm a rung only after all its purchased shares reach its own TP.',
-  fees: 'Passive paper limits: no taker fee modeled. Rebates are zero until a verified payment exists.',
+  fees: 'Passive paper fills have zero fees. Price-dependent maker rebate scenarios are shown separately; estimates are not paid income or trading equity.',
   resolutionPollMs: config.DIP_BOUNCE_RESOLUTION_POLL_MS,
 };
 const EPS = 1e-8;
@@ -231,6 +232,7 @@ class RungLadderBot extends Base {
       settledPositions: closed.length,
       winRate: closed.length ? 100 * wins / closed.length : 0,
       totalRebates: 0,
+      makerRebates: summarizeMakerRebates(this.orders),
     };
   }
 
