@@ -52,7 +52,7 @@ class FreqAIBtcBot extends DipBounceBot {
     const prediction = modelState.lastPrediction;
     if (prediction
       && Number(prediction.windowStart) === Number(market.start)
-      && fresh(prediction.candleCloseAt, now, 120_000)
+      && fresh(prediction.candleStart, now, 120_000)
       && Number.isFinite(Number(prediction.pUp))
       && Number.isFinite(Number(prediction.pDown))) {
       const pUp = Number(prediction.pUp);

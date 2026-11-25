@@ -159,8 +159,12 @@ class FreqAIWorker {
       writtenAt: Number(raw.writtenAt) || this.now(),
       model: String(raw.model || 'LightGBMClassifier'),
     };
-    const ageMs = this.now() - this.lastPrediction.candleCloseAt;
-    this.status = ageMs <= 120_000 && ageMs >= -5000 ? 'READY' : 'STALE';
+    const ageMs = this.now() - this.lastPrediction.candleStart;
+    const predictionAgeMs = this.now() - this.lastPrediction.writtenAt;
+    this.status = ageMs <= 120_000 && ageMs >= -5000
+      && predictionAgeMs <= 120_000 && predictionAgeMs >= -5000
+      ? 'READY'
+      : 'STALE';
   }
 
   snapshot() {

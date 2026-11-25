@@ -42,8 +42,8 @@ test('uses the higher FreqAI probability and buys only once per window', () => {
   const { bot, record, quote, now, start } = setup({
     prediction: {
       windowStart: 1_800_000_000_000,
-      candleStart: 1_800_000_000_000,
-      candleCloseAt: 1_800_000_060_000,
+      candleStart: 1_800_000_060_000,
+      candleCloseAt: 1_800_000_120_000,
       pUp: 0.68,
       pDown: 0.32,
       model: 'LightGBMClassifier',
@@ -90,7 +90,8 @@ test('waits through the first minute and will not invent a fill without asks', (
     offset: 60_000,
     prediction: {
       windowStart: 1_800_000_000_000,
-      candleCloseAt: 1_800_000_060_000,
+      candleStart: 1_800_000_060_000,
+      candleCloseAt: 1_800_000_120_000,
       pUp: 0.6,
       pDown: 0.4,
     },
@@ -104,7 +105,8 @@ test('does not close an open position through old take-profit or stop-loss rules
   const { bot, record, quote } = setup({
     prediction: {
       windowStart: 1_800_000_000_000,
-      candleCloseAt: 1_800_000_060_000,
+      candleStart: 1_800_000_060_000,
+      candleCloseAt: 1_800_000_120_000,
       pUp: 0.6,
       pDown: 0.4,
     },

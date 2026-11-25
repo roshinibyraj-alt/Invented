@@ -17,8 +17,8 @@ test('reads and normalizes an atomic current-window FreqAI prediction', (t) => {
     doPredict: true,
     pUp: 2,
     pDown: 3,
-    candleStart: 1_800_000_000_000,
-    candleCloseAt: 1_800_000_060_000,
+    candleStart: 1_800_000_060_000,
+    candleCloseAt: 1_800_000_120_000,
     windowStart: 1_800_000_000_000,
     writtenAt: now,
   }));
