@@ -1,5 +1,8 @@
 'use strict';
 
+const MAX_BUY_SHARES = 500;
+const FLIP_MAX_HELD_BID = 0.50;
+
 const isFresh = (quote, now) => Number.isFinite(quote?.updatedAt)
   && now >= quote.updatedAt - 1000 && now - quote.updatedAt <= 2000;
 
@@ -24,16 +27,18 @@ function windowNet(bot, record) {
 
 // Find the smallest whole-share buy, at least the base, whose $1 payout
 // covers this window's net realized deficit, including all modeled fees.
-function recoveryShares(quote, deficit, rate, base = 50) {
+function recoveryShares(quote, deficit, rate, base = 50, maximum = Infinity) {
   let quantity = 0;
   let profit = 0;
   for (const { price, size } of levelsFor(quote, 'asks')) {
     const net = 1 - price - rate * price * (1 - price);
     if (net <= 0) continue;
     const required = Math.max(0, base - quantity, (deficit - profit) / net);
-    const take = Math.min(size, Math.ceil(required - 1e-9));
+    const take = Math.min(size, maximum - quantity, Math.ceil(required - 1e-9));
     quantity += take;
     profit += take * net;
+    // A capped recovery may leave a deficit even at a winning $1 payout.
+    if (quantity >= maximum) return maximum;
     if (quantity >= base && profit + 1e-8 >= deficit) {
       // Fractional depth at intermediate levels may leave a fractional total.
       if (Math.abs(quantity - Math.round(quantity)) < 1e-8) return Math.round(quantity);
@@ -44,10 +49,18 @@ function recoveryShares(quote, deficit, rate, base = 50) {
   return null;
 }
 
+function flipBlockedByPrice(quote) {
+  const bids = levelsFor(quote, 'bids');
+  const reportedBid = quote?.bestBid == null ? NaN : Number(quote.bestBid);
+  return Math.max(Number.isFinite(reportedBid) ? reportedBid : -Infinity,
+    bids[0]?.price ?? -Infinity) > FLIP_MAX_HELD_BID;
+}
+
 function sellForFlip(bot, record, position, now) {
   const quote = record.quotes[position.side];
   const rate = feeRateFor(record.market);
   if (!isFresh(quote, now) || rate == null) return false;
+  if (flipBlockedByPrice(quote)) return false;
   // A partial sweep may only reuse this side's book after a new book update.
   const version = `${quote.sequence ?? ''}:${quote.updatedAt}`;
   const used = bot.orders.some((order) => order.action === 'SELL_FLIP'
@@ -110,4 +123,7 @@ function sellForFlip(bot, record, position, now) {
   return remaining <= 1e-8;
 }
 
-module.exports = { isFresh, feeRateFor, windowNet, recoveryShares, sellForFlip };
+module.exports = {
+  isFresh, feeRateFor, windowNet, recoveryShares, sellForFlip,
+  flipBlockedByPrice, MAX_BUY_SHARES, FLIP_MAX_HELD_BID,
+};

@@ -1,7 +1,10 @@
 'use strict';
 
 const DipBounceBot = require('./dip-bounce-bot');
-const { isFresh, feeRateFor, windowNet, recoveryShares, sellForFlip } = require('./freqai-recovery');
+const {
+  isFresh, feeRateFor, windowNet, recoveryShares, sellForFlip,
+  flipBlockedByPrice, MAX_BUY_SHARES, FLIP_MAX_HELD_BID,
+} = require('./freqai-recovery');
 
 const STRATEGY = Object.freeze({
   id: 'btc-5m-freqai-recovery-flips-paper-v2',
@@ -14,8 +17,8 @@ const STRATEGY = Object.freeze({
   prediction: 'Use the higher FreqAI UP/DOWN class probability. No minimum-confidence or edge gate, so an entry is not rejected for a low score.',
   entry: 'First entry is 50 shares after 80 seconds. The existing higher-probability selection and labeled Binance warm-up fallback apply only to the initial buy.',
   fill: 'Sweep visible Polymarket asks up to the $1.00 maximum valid outcome price, record actual depth-weighted paper fill and modeled taker fees; partial fills are recorded.',
-  exit: 'An opposite current-window FreqAI signal strictly above 60% sells the held shares against visible bids, then buys the opposite side. No TP or SL; remaining shares go to official resolution.',
-  sizing: 'Replacement buy is at least 50 shares, sized to recover net realized window losses and fees at a $1 winning resolution. No recovery debt carries to the next window. Cash and visible depth constrain execution; recovery is not guaranteed.',
+  exit: 'An opposite current-window FreqAI signal strictly above 60% can flip only while the held best bid is $0.50 or below. Above $0.50, keep holding and recheck. No TP or SL; remaining shares go to official resolution.',
+  sizing: 'Initial buy is 50 shares; every buy is capped at 500 shares. Recovery buys target current-window realized losses and fees at a $1 payout, with a 50-share floor and 500-share ceiling. The cap can leave losses unrecovered. Cash and visible depth constrain execution; no debt carries to the next window.',
   cadence: 'One initial entry, followed by qualifying recovery flips; no same-side adding.',
 });
 
@@ -158,6 +161,9 @@ class FreqAIBtcBot extends DipBounceBot {
     const askBook = record.quotes[decision.side];
     if (!isFresh(bidBook, now) || !bidBook.bids?.length) {
       return ['WAITING_FOR_HELD_BIDS', 'Flip score qualified; waiting for fresh bids to sell the held side.'];
+    }
+    if (flipBlockedByPrice(bidBook)) {
+      return ['FLIP_BLOCKED_HELD_PRICE', 'Held best bid is above $0.50; keep holding and recheck the same signal as quotes update.'];
     }
     if (!isFresh(askBook, now) || !askBook.asks?.length) {
       return ['WAITING_FOR_OPPOSITE_ASKS', 'Flip score qualified; waiting for fresh asks on the opposite side.'];
@@ -366,6 +372,12 @@ class FreqAIBtcBot extends DipBounceBot {
       if (audit) this.recordPredictionAudit(decision, record, now, hasEntry ? 'WAITING_FOR_OPPOSITE_ASKS' : 'WAITING_FOR_INITIAL_ASKS', state.reason);
       return;
     }
+    if (held.some((position) => flipBlockedByPrice(record.quotes[position.side]))) {
+      state.orderStatus = 'FLIP_BLOCKED_HELD_PRICE';
+      state.reason = 'Held best bid is above $0.50; no sale or opposite buy. Rechecking while the window is open.';
+      if (audit) this.recordPredictionAudit(decision, record, now, 'FLIP_BLOCKED_HELD_PRICE', state.reason);
+      return;
+    }
     for (const position of held) {
       if (!sellForFlip(this, record, position, now)) {
         state.orderStatus = 'WAITING_FOR_FLIP_SELL';
@@ -394,11 +406,11 @@ class FreqAIBtcBot extends DipBounceBot {
     }
     const recoveryDeficit = hasEntry ? Math.max(0, -windowNet(this, record)) : 0;
     const requestedShares = hasEntry
-      ? recoveryShares(quote, recoveryDeficit, feeRate, SHARES_PER_WINDOW)
-      : SHARES_PER_WINDOW;
+      ? recoveryShares(quote, recoveryDeficit, feeRate, SHARES_PER_WINDOW, MAX_BUY_SHARES)
+      : Math.min(SHARES_PER_WINDOW, MAX_BUY_SHARES);
     if (requestedShares == null) {
       state.orderStatus = 'WAITING_FOR_RECOVERY_DEPTH';
-      state.reason = `Visible asks cannot yet support a buy covering the $${recoveryDeficit.toFixed(2)} window deficit.`;
+      state.reason = `Waiting for visible depth for a recovery buy, capped at ${MAX_BUY_SHARES} shares; window deficit $${recoveryDeficit.toFixed(2)}.`;
       if (audit) this.recordPredictionAudit(decision, record, now, 'WAITING_FOR_RECOVERY_DEPTH', state.reason);
       return;
     }
@@ -579,6 +591,8 @@ class FreqAIBtcBot extends DipBounceBot {
         baseShares: SHARES_PER_WINDOW,
         sharesPerWindow: SHARES_PER_WINDOW,
         flipProbabilityAbove: FLIP_PROBABILITY,
+        flipMaxHeldBid: FLIP_MAX_HELD_BID,
+        maxBuyShares: MAX_BUY_SHARES,
         resetEachWindow: true,
       },
     };
@@ -604,6 +618,8 @@ class FreqAIBtcBot extends DipBounceBot {
     state.recovery = {
       baseShares: SHARES_PER_WINDOW,
       flipProbabilityAbove: FLIP_PROBABILITY,
+      flipMaxHeldBid: FLIP_MAX_HELD_BID,
+      maxBuyShares: MAX_BUY_SHARES,
       windowRealizedPnl: record?.market ? windowNet(this, record) : 0,
       deficit: record?.market ? Math.max(0, -windowNet(this, record)) : 0,
       resetEachWindow: true,

@@ -53,7 +53,7 @@
       <div class="prob down"><span>DOWN PROBABILITY</span><strong id="pDown">—</strong></div>
     </div>
     <div class="bar"><i id="probBar" style="width:50%"></i></div>
-    <div class="model-note" id="modelDecision">50-share initial buy; flip only on an opposite FreqAI probability above 60%.</div>
+    <div class="model-note" id="modelDecision">50-share initial buy; 500-share maximum per buy. Flips require an opposite score above 60% and held bid at or below $0.50.</div>
     <div class="model-note" id="recovery">Window recovery deficit: $0.00 · resets each new window</div>
   </section>
   <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
@@ -86,7 +86,7 @@
     <h2>BTC model signals with window-only recovery flips</h2>
     <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Labels are the direction of the enclosing 5-minute BTC candle at its close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
     <p>After the first minute can close, the bot chooses whichever class has the higher predicted probability. There is no minimum-confidence or edge gate, so a low-confidence forecast still selects a side. If no current-window model prediction exists by 80 seconds, a fresh Binance window-direction fallback is used and shown in activity.</p>
-    <p>Start each window with a 50-share paper buy. If the opposite side's fresh FreqAI probability is strictly above 60%, sell the held position against visible bids down to $0.01. Once sold, buy the opposite side, with at least 50 shares, sized so a $1 winning payout could recover this window's net realized losses and fees. No same-side adding.</p>
+    <p>Start each window with a 50-share paper buy. Flip only if the opposite fresh FreqAI probability is strictly above 60% and the held side's best bid is $0.50 or below. Above $0.50, keep holding and recheck. Once sold, buy the opposite side with 50–500 shares, targeting this window's losses and fees at a $1 payout. Every buy is capped at 500 shares, so recovery can remain incomplete. No same-side adding.</p>
     <p>Buys sweep visible asks up to $1.00. Sell and buy fees are included. Partial sells wait for fresh liquidity before a replacement buy; insufficient depth or cash can delay a recovery buy. Remaining shares hold to official resolution, with no TP or SL. Recovery resets at each new window and is not guaranteed. Freqtrade is prediction-only in dry mode; no live orders are sent.</p>
     <p class="muted" id="ledger">Paper ledger —</p>
   </section>
@@ -142,6 +142,7 @@
   function auditLabel(code){
     return ({INITIAL_SIGNAL:'Initial signal',RECOVERY_SIGNAL:'Recovery signal',HOLDING_SAME_SIDE:'Holding same side',
       FLIP_THRESHOLD_NOT_MET:'Below the 60% flip threshold',FLIP_SIGNAL_QUALIFIED:'Flip signal qualified',
+      FLIP_BLOCKED_HELD_PRICE:'Holding: bid above $0.50',
       WAITING_FOR_HELD_BIDS:'Waiting for held-side bids',WAITING_FOR_OPPOSITE_ASKS:'Waiting for opposite-side asks',
       WAITING_FOR_INITIAL_ASKS:'Waiting for entry asks',WAITING_FOR_RECOVERY_DEPTH:'Waiting for recovery depth',
       WAITING_FOR_PAPER_CASH:'Waiting for paper cash',BLOCKED_INVALID_FEE:'Blocked by invalid fee data',
@@ -165,7 +166,7 @@
     renderEquityChart(a.equityCurve,a.initialCapital,a.equity);
     const p=f.prediction, d=s.currentDecision;
     const recovery=s.recovery||{};
-    $('recovery').textContent=`Window realized P&L ${signed(recovery.windowRealizedPnl)} · recovery deficit ${money(recovery.deficit)} · resets each window`;
+    $('recovery').textContent=`Window realized P&L ${signed(recovery.windowRealizedPnl)} · recovery deficit ${money(recovery.deficit)} · max ${recovery.maxBuyShares||500} shares per buy · no flip above $0.50 held bid · resets each window`;
     $('modelStatus').textContent=String(f.status||'WAITING').replace(/_/g,' ');
     $('modelStatus').className='badge '+(f.status==='READY'?'':'warn');
     $('modelNote').textContent=f.lastError?`Model worker: ${f.lastError}`:(p?`Current-window score from ${esc(p.model||'FreqAI')} · candle ${time(p.candleStart)}`:'FreqAI is training or waiting for its next 1-minute candle.');

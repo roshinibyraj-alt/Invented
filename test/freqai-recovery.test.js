@@ -143,7 +143,8 @@ test('repeated flips recalculate cumulative losses, then next window starts at 5
   f.check('UP');
   assert.ok(f.bot.snapshot().recovery.deficit > firstDeficit);
   const p = f.bot.positions.find(p => p.status === 'OPEN');
-  assert.ok(windowNet(f.bot, f.record) + p.shares - p.totalCost - p.fees >= -1e-8);
+  assert.equal(p.shares, 500);
+  assert.ok(windowNet(f.bot, f.record) + p.shares - p.totalCost - p.fees < 0);
 
   p.status = 'PENDING_RESOLUTION';
   f.advance(300_000);
@@ -158,13 +159,51 @@ test('repeated flips recalculate cumulative losses, then next window starts at 5
   assert.equal(f.bot.snapshot().recovery.deficit, 0);
 });
 
-test('profitable sale keeps the replacement at the 50-share floor', () => {
+test('held best bid above 0.50 blocks both sale and replacement', () => {
   const f = fixture();
   f.signal(0.2, 0.8);
   f.book('UP', 0.91, 0.9);
   f.check('DOWN');
-  assert.ok(windowNet(f.bot, f.record) > 0);
-  assert.equal(f.bot.positions.find(p => p.status === 'OPEN').shares, 50);
+  assert.equal(f.bot.orders.length, 1);
+  assert.equal(f.bot.positions.find(p => p.status === 'OPEN').side, 'UP');
+  assert.equal(f.record.sideStates.DOWN.orderStatus, 'FLIP_BLOCKED_HELD_PRICE');
+  assert.equal(f.bot.snapshot().freqai.auditTrail[0].status, 'FLIP_BLOCKED_HELD_PRICE');
+  // No new prediction is required: the same signal can flip once bid is 0.50.
+  f.book('UP', 0.51, 0.50);
+  f.check('DOWN');
+  assert.equal(f.bot.positions.find(p => p.status === 'OPEN').side, 'DOWN');
+  assert.equal(f.bot.orders.filter(o => o.action === 'SELL_FLIP').length, 1);
+});
+
+test('protection uses held-side best bid, not ask or midpoint', () => {
+  const f = fixture();
+  f.signal(0.2, 0.8);
+  f.book('UP', 0.9, 0.5);
+  f.check('DOWN');
+  assert.equal(f.bot.positions.find(p => p.status === 'OPEN').side, 'DOWN');
+});
+
+test('recovery buy is capped at 500 even when winning cannot recover losses', () => {
+  const f = fixture();
+  f.signal(0.2, 0.8);
+  f.book('UP', 0.02, 0.01);
+  f.book('DOWN', 0.99, 0.98);
+  f.check('DOWN');
+  const p = f.bot.positions.find(p => p.status === 'OPEN');
+  assert.equal(p.side, 'DOWN');
+  assert.equal(p.shares, 500);
+  assert.equal(p.requestedShares, 500);
+  assert.ok(windowNet(f.bot, f.record) + p.shares - p.totalCost - p.fees < 0);
+  assert.equal(f.bot.snapshot().recovery.maxBuyShares, 500);
+  assert.equal(f.bot.snapshot().recovery.flipMaxHeldBid, 0.5);
+  assert.ok(f.bot.orders.filter(o => o.action === 'BUY_TAKER').every(o => o.requestedShares <= 500));
+});
+
+test('capped planner uses actual multi-level depth and keeps smaller recoveries', () => {
+  const depth = { asks: [{ price: 0.98, size: 123.45 }, { price: 0.99, size: 5000 }] };
+  assert.equal(recoveryShares(depth, 100, 0.05, 50, 500), 500);
+  assert.equal(recoveryShares({ asks: [{ price: 0.9, size: 499 }] }, 100, 0.05, 50, 500), null);
+  assert.equal(recoveryShares({ asks: [{ price: 0.5, size: 5000 }] }, 0, 0.05, 50, 500), 50);
 });
 
 test('restart keeps held position and current-window recovery without duplicate entry', () => {
