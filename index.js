@@ -27,13 +27,12 @@ async function main() {
     return;
   }
 
-  const Bot = require('./freqai-btc-bot');
+  const Bot = require('./freqai-resting-btc-bot');
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
   const BinanceTickFeed = require('./binance-tick-feed');
   const FreqAIWorker = require('./freqai-worker');
-  const FreqAIAuditStore = require('./freqai-audit-store');
   const PaperLedgerStore = require('./paper-ledger-store');
   const ledgerPath = process.env.PAPER_LEDGER_PATH || null;
   const ledgerStore = ledgerPath ? new PaperLedgerStore(ledgerPath) : null;
@@ -45,10 +44,7 @@ async function main() {
   await restoreOrResetLedger(bot, savedLedger, Bot.STRATEGY.id);
   const binanceFeed = new BinanceTickFeed();
   const freqaiWorker = new FreqAIWorker();
-  const auditStore = new FreqAIAuditStore(path.join(freqaiWorker.dataDir, 'freqai', 'score-flip-audit.json'));
   bot.setMarketDataHelpers({ binanceFeed, freqaiWorker });
-  bot.setAuditStore(auditStore);
-  bot.restoreAuditTrail(auditStore.load());
   freqaiWorker.start();
   void binanceFeed.start().catch((error) => {
     console.error('[binance-feed] Could not start spot feed:', error?.message || error);
@@ -56,7 +52,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- FreqAI-guided BTC 5-minute paper entries; no live orders are sent.');
+  console.log('MODE: DEMO -- >58% FreqAI, flat 100-share resting limits at ask minus $0.10 after 45 seconds; no flips or live orders.');
 
   let stopping = false;
   const shutdown = async () => {
@@ -68,7 +64,6 @@ async function main() {
     const forcedExit = setTimeout(() => process.exit(1), 10_000);
     forcedExit.unref?.();
     await bot.flushLedger();
-    await bot.flushAuditTrail();
     server.close(() => {
       clearTimeout(forcedExit);
       process.exit(0);

@@ -36,26 +36,25 @@ test('dashboard shows model probabilities, current position and resolution histo
   assert.ok(e.get('events').innerHTML.indexOf('FIRST')<e.get('events').innerHTML.indexOf('SECOND'));
 });
 
-test('dashboard renders the saved equity chart and readable flip-audit checks',async()=>{
+test('dashboard renders the saved equity chart and resting-order status',async()=>{
   const e=await render({
     now:1800000090000,
     account:{cash:3000,equity:3020,initialCapital:3000,equityCurve:[
       {at:1800000000000,equity:3000},{at:1800000060000,equity:3020},
     ]},
-    freqai:{auditTrail:[{
-      predictionAt:1800000085000,windowStart:1800000000000,candleStart:1800000060000,
-      predictedSide:'DOWN',pUp:.38,pDown:.62,heldSide:'UP',oppositeProbability:.62,
-      flipQualified:true,status:'WAITING_FOR_HELD_BIDS',reason:'Waiting for fresh visible bids.',
-      selectedBook:{bestBid:.4,bestAsk:.41,visibleBidShares:100,visibleAskShares:200,fresh:true},
-      heldBook:{bestBid:null,bestAsk:.6,visibleBidShares:0,visibleAskShares:20,fresh:false,ageMs:3000},
-      checks:[{at:1800000085000,status:'FLIP_SIGNAL_QUALIFIED',reason:'Opposite score exceeds 60%.'}],
-    }],auditPersistence:{enabled:true}},
+    freqai:{status:'READY'},
+    orders:[{side:'DOWN',status:'PARTIAL',signalProbability:.59,signalAsk:.7,
+      limitPrice:.6,filledShares:40,remainingShares:60,placedAt:1800000085000,windowEnd:1800000300000}],
+    restingOrderSummary:{reservedCash:36,active:1},
     markets:[],positions:[],events:[],
   });
   assert.match(e.get('equityChart').innerHTML,/chart-line/);
   assert.match(e.get('equityRange').textContent,/2 points/);
   assert.match(e.get('auditTrail').innerHTML,/DOWN/);
-  assert.match(e.get('auditTrail').innerHTML,/QUALIFIED/);
-  assert.match(e.get('auditTrail').innerHTML,/Waiting for held-side bids/);
-  assert.match(e.get('auditTrail').innerHTML,/Waiting for fresh visible bids/);
+  assert.match(e.get('auditTrail').innerHTML,/PARTIAL/);
+  assert.match(e.get('auditTrail').innerHTML,/40 \/ 100 filled/);
+  assert.match(e.get('auditTrail').innerHTML,/\$0\.600/);
+  assert.equal(e.get('auditSummary').textContent,'1 active');
+  assert.match(e.get('modelDecision').textContent,/>58%/);
+  assert.doesNotMatch(e.get('modelDecision').textContent,/60%|80 seconds/);
 });

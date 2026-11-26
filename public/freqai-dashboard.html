@@ -53,14 +53,20 @@
       <div class="prob down"><span>DOWN PROBABILITY</span><strong id="pDown">—</strong></div>
     </div>
     <div class="bar"><i id="probBar" style="width:50%"></i></div>
-    <div class="model-note" id="modelDecision">50-share initial buy; 500-share maximum per buy. Flips require an opposite score above 60% and held bid at or below $0.50.</div>
-    <div class="model-note" id="recovery">Window recovery deficit: $0.00 · resets each new window</div>
+    <div style="font:850 32px var(--mono);margin-top:12px">100 shares</div>
+    <div class="model-note" id="modelDecision">After 45 seconds, a current-window score strictly above 58% places a fixed limit at ask minus $0.10.</div>
+    <div class="model-note" id="recovery">No recovery sizing, signal selling, TP or SL.</div>
   </section>
   <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
   <section class="panel">
     <div class="window-head"><div><h2>Bitcoin Up or Down · 5m</h2><div class="window-meta" id="windowMeta">Waiting for current market…</div></div><div class="clock" id="clock">—</div></div>
     <div class="quotes" id="quotes"><div class="empty">Waiting for current Polymarket book.</div></div>
     <div id="position"><div class="empty">No entry in this window yet.</div></div>
+  </section>
+  <div class="section-title"><h2>Resting buy orders</h2><span id="auditSummary">0 active</span></div>
+  <section class="panel">
+    <div class="model-note" id="reserved">Reserved $0.00 · 100 shares per new order</div>
+    <div class="audit-list" id="auditTrail" style="margin-top:12px"><div class="empty">Waiting for a current-window signal above 58%.</div></div>
   </section>
   <section class="grid two">
     <article>
@@ -76,18 +82,14 @@
     <div class="model-head"><div class="model-name">Recent activity</div><span class="muted" id="socket">—</span></div>
     <div class="events" id="events"><div class="empty">Waiting for activity.</div></div>
   </section>
-  <div class="section-title"><h2>Score &amp; flip audit</h2><span id="auditSummary">Waiting for model scores</span></div>
-  <section class="panel">
-    <div class="model-note">One row per FreqAI score, including held side, the strict &gt;60% flip check, and the book/execution state. Stored separately from the trading ledger.</div>
-    <div class="audit-list" id="auditTrail" style="margin-top:12px"><div class="empty">No score checks recorded yet.</div></div>
-  </section>
   <section class="strategy">
     <div class="label">Strategy details</div>
-    <h2>BTC model signals with window-only recovery flips</h2>
+    <h2>BTC model signals with 100-share resting limits</h2>
     <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Labels are the direction of the enclosing 5-minute BTC candle at its close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
-    <p>After the first minute can close, the bot chooses whichever class has the higher predicted probability. There is no minimum-confidence or edge gate, so a low-confidence forecast still selects a side. If no current-window model prediction exists by 80 seconds, a fresh Binance window-direction fallback is used and shown in activity.</p>
-    <p>Start each window with a 50-share paper buy. Flip only if the opposite fresh FreqAI probability is strictly above 60% and the held side's best bid is $0.50 or below. Above $0.50, keep holding and recheck. Once sold, buy the opposite side with 50–500 shares, targeting this window's losses and fees at a $1 payout. Every buy is capped at 500 shares, so recovery can remain incomplete. No same-side adding.</p>
-    <p>Buys sweep visible asks up to $1.00. Sell and buy fees are included. Partial sells wait for fresh liquidity before a replacement buy; insufficient depth or cash can delay a recovery buy. Remaining shares hold to official resolution, with no TP or SL. Recovery resets at each new window and is not guaranteed. Freqtrade is prediction-only in dry mode; no live orders are sent.</p>
+    <p>After a minimum of 45 seconds, require a fresh current-window probability strictly above 58%. Place 100 shares at that side’s best ask minus $0.10, rounded down to the market tick. No Binance fallback. The existing prediction model is unchanged, so its first usable current-window forecast normally arrives after the first minute closes.</p>
+    <p>The limit stays fixed when price or same-side confidence changes. Only a fresh opposite score above 58% cancels the unfilled remainder and places a new opposite 100-share limit. Already filled shares are never sold by signal. A fully filled order consumes the window; partial fills remain held even if the remainder is replaced.</p>
+    <p>Orders reserve paper capital and expire at their own window end. Simulated maker fills require subsequent fresh ask depth strictly below the limit. A bid touch or unchanged displayed depth cannot create repeated fills. Queue priority is unknown; these are paper estimates, not guaranteed live fills.</p>
+    <p>Maker fees are zero; no unverified rebate income is credited. Hold filled shares to official resolution, with no take-profit, stop-loss or recovery sizing. Freqtrade remains prediction-only in dry mode; no live orders are sent.</p>
     <p class="muted" id="ledger">Paper ledger —</p>
   </section>
   <div class="footer">Paper simulation only · no live orders · Binance is the prediction data source</div>
@@ -165,22 +167,21 @@
     $('tradesFees').textContent=`${Number(a.settledPositions||0)+Number(a.openPositions||0)} · ${money(a.totalFees)}`;
     renderEquityChart(a.equityCurve,a.initialCapital,a.equity);
     const p=f.prediction, d=s.currentDecision;
-    const recovery=s.recovery||{};
-    $('recovery').textContent=`Window realized P&L ${signed(recovery.windowRealizedPnl)} · recovery deficit ${money(recovery.deficit)} · max ${recovery.maxBuyShares||500} shares per buy · no flip above $0.50 held bid · resets each window`;
+    $('recovery').textContent='Flat 100 shares · no recovery sizing or signal selling · hold fills to resolution';
     $('modelStatus').textContent=String(f.status||'WAITING').replace(/_/g,' ');
     $('modelStatus').className='badge '+(f.status==='READY'?'':'warn');
     $('modelNote').textContent=f.lastError?`Model worker: ${f.lastError}`:(p?`Current-window score from ${esc(p.model||'FreqAI')} · candle ${time(p.candleStart)}`:'FreqAI is training or waiting for its next 1-minute candle.');
-    const display=p||(d?.source==='FREQAI'?d:null);
+    const display=p;
     if(display&&num(display.pUp)&&num(display.pDown)){
       $('pUp').textContent=(Number(display.pUp)*100).toFixed(1)+'%';$('pDown').textContent=(Number(display.pDown)*100).toFixed(1)+'%';$('probBar').style.width=(Number(display.pUp)*100).toFixed(1)+'%';
     }else{$('pUp').textContent='—';$('pDown').textContent='—';$('probBar').style.width='50%'}
-    $('modelDecision').textContent=d?(d.source==='FREQAI'?`Last buy: ${d.side} at ${time(d.at)}; ${(d.pUp*100).toFixed(1)}% UP / ${(d.pDown*100).toFixed(1)}% DOWN. Opposite flips require above 60%.`:`Initial ${d.side} buy used fresh Binance direction at ${time(d.at)}; no model probability was available. Flips require a FreqAI score above 60%.`):'Initial buy: 50 shares after 80 seconds. Opposite flips require FreqAI above 60%.';
+    $('modelDecision').textContent='After 45 seconds: current-window score >58% places 100 shares at ask − $0.10. An opposite >58% score replaces only unfilled shares.';
     if(market){
       $('windowTitle').textContent=market.marketStatus||'—';$('windowMeta').textContent=`${time(market.start)} – ${time(market.end)} · ${esc(market.marketStatus||'')}`;$('clock').textContent=countdown(market.secondsRemaining);
       $('quotes').innerHTML=['UP','DOWN'].map(side=>{const q=market.sideStates?.[side]||{};return `<div class="quote ${side.toLowerCase()}"><div class="quote-head"><span>${side}</span><span class="muted">${q.fresh?'LIVE':'STALE'}</span></div><div class="quote-prices"><div>BEST BID<b>${px(q.bestBid)}</b></div><div>BEST ASK<b>${px(q.bestAsk)}</b></div><div>MID<b>${px(q.mid)}</b></div></div></div>`}).join('');
-      const position=(s.positions||[]).find(x=>x.status==='OPEN'&&String(x.windowStart)===String(market.start));
+      const positions=(s.positions||[]).filter(x=>x.status==='OPEN'&&String(x.windowStart)===String(market.start));
       const state=market.sideStates?.[market.triggeredSide]||null;
-      $('position').innerHTML=position?positionCard(position):`<div class="empty">${esc(state?.reason||'No entry in this window yet.')} · ${esc(state?.orderStatus||'WAITING')}</div>`;
+      $('position').innerHTML=positions.length?positions.map(positionCard).join(''):`<div class="empty">${esc(state?.reason||'No filled position in this window yet.')} · ${esc(state?.orderStatus||'WAITING')}</div>`;
     }else{$('windowTitle').textContent='Searching';$('windowMeta').textContent='No active BTC 5-minute market found.';$('clock').textContent='—';$('quotes').innerHTML='<div class="empty">Waiting for current Polymarket book.</div>';$('position').innerHTML='<div class="empty">No active window.</div>'}
     const pos=s.positions||[];
     const pending=pos.filter(x=>x.status==='PENDING_RESOLUTION');
@@ -188,8 +189,10 @@
     $('pendingCount').textContent=pending.length;$('pending').innerHTML=pending.length?pending.slice(0,10).map(x=>row(x,true)).join(''):'<div class="empty">No positions pending.</div>';
     $('closedCount').textContent=closed.length;$('closed').innerHTML=closed.length?closed.slice(0,10).map(x=>row(x)).join(''):'<div class="empty">No resolved trades yet.</div>';
     $('events').innerHTML=(s.events||[]).slice(0,8).map(e=>`<div class="event"><time>${time(e.time)}</time><b>${esc(e.type||'Activity')}</b><p>${esc(e.message||'')}</p></div>`).join('')||'<div class="empty">No recent activity.</div>';
-    const audit=f.auditTrail||[],auditSave=f.auditPersistence||{};$('auditSummary').textContent=`${audit.length} recent scores · ${auditSave.error?'save error':auditSave.enabled?(auditSave.restored?'saved':'saving'):'not persistent'}`;
-    $('auditTrail').innerHTML=audit.length?audit.slice(0,20).map(auditCard).join(''):'<div class="empty">No score checks recorded yet.</div>';
+    const orders=s.orders||[],resting=orders.filter(o=>['RESTING','PARTIAL'].includes(o.status));
+    $('auditSummary').textContent=resting.length+' active';
+    $('reserved').textContent='Reserved '+money(s.restingOrderSummary?.reservedCash??a.reservedCash)+' · available '+money(a.availableCash)+' · 100 shares per new limit';
+    $('auditTrail').innerHTML=orders.length?orders.slice(0,12).map(o=>`<article class="audit"><div class="audit-head"><b><span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))}</b><strong>${px(o.limitPrice)}</strong></div><div class="model-note">Signal ${(Number(o.signalProbability)*100).toFixed(1)}% · ask ${px(o.signalAsk)}<br>${shares(o.filledShares)} / 100 filled · ${shares(o.remainingShares)} resting<br>Placed ${time(o.placedAt)} · expires ${time(o.windowEnd)}</div></article>`).join(''):'<div class="empty">Waiting for a fresh current-window signal above 58%.</div>';
     const ws=s.websocket||{};$('socket').textContent=`CLOB ${ws.status||'—'} · ${time(s.now)}`;
     const lp=s.ledgerPersistence||{};$('ledger').textContent='Paper ledger '+(lp.error?`save error: ${lp.error}`:lp.enabled?`saved ${time(lp.lastSavedAt)}`:'not persistent');
     $('status').textContent=s.status||'—';$('status').className='badge '+(/ERROR|BLOCKED/i.test(s.status||'')?'bad':s.status==='RUNNING'?'':'warn');
