@@ -1,5 +1,7 @@
 'use strict';
 
+const { valuationSummary, settledBalanceHistory } = require('./paper-valuation');
+
 const DipBounceBot = require('./dip-bounce-bot');
 const { RestingOrderEngine, SHARES, THRESHOLD, active, fresh } = require('./resting-order-engine');
 
@@ -118,6 +120,7 @@ class FreqAIRestingBTCBot extends DipBounceBot {
         || p.markBid == null || !fresh({ updatedAt: p.markUpdatedAt }, this.now())));
     if (unknown) { a.equity = null; a.unrealizedPnl = null; a.markedValue = null; }
     a.settledBalance = this.initialCapital + a.realizedPnl;
+    a.valuation = valuationSummary(this.positions, this.now(), 2000);
     return a;
   }
 
@@ -134,6 +137,10 @@ class FreqAIRestingBTCBot extends DipBounceBot {
 
   snapshot() {
     const s = super.snapshot();
+    const history = settledBalanceHistory(this.positions, this.initialCapital,
+      s.account.settledBalance, this.now(), this.equityCurve[0]?.at);
+    s.account.settledBalanceCurve = history.points;
+    s.account.settlementHistoryIncomplete = history.incomplete;
     const worker = this.freqaiWorker?.snapshot?.() || {};
     const market = this.records.get('BTC:5m')?.market;
     const p = currentPrediction(worker.lastPrediction, market, this.now());

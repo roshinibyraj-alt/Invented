@@ -29,20 +29,24 @@
     <span class="badge warn" id="status">CONNECTING</span>
   </header>
   <section class="panel equity">
-    <div class="label">Paper account equity</div><div class="money" id="equity">—</div>
+    <div class="label" id="equityLabel">Paper account equity</div><div class="money" id="equity">—</div>
     <div class="pnl" id="totalPnl">—</div>
+    <div class="model-note" id="equityStatus" role="status">Waiting for account valuation…</div>
     <div class="stats">
       <div class="stat"><span class="label">Available cash</span><strong id="cash">—</strong></div>
-      <div class="stat"><span class="label">Open P&amp;L</span><strong id="openPnl">—</strong></div>
+      <div class="stat"><span class="label" id="openPnlLabel">Open P&amp;L</span><strong id="openPnl">—</strong></div>
+      <div class="stat"><span class="label">Settled balance</span><strong id="settledBalance">—</strong></div>
+      <div class="stat"><span class="label">Realized P&amp;L</span><strong id="realizedPnl">—</strong></div>
       <div class="stat"><span class="label">Win rate</span><strong id="winRate">—</strong></div>
       <div class="stat"><span class="label">Trades / fees</span><strong id="tradesFees">—</strong></div>
     </div>
     <div class="chart-wrap">
-      <div class="chart-head"><strong>Equity history</strong><span id="equityRange">—</span></div>
+      <div class="chart-head"><strong>Balance &amp; equity history</strong><span id="equityRange">—</span></div>
+      <div class="model-note"><span style="color:#39e0a1">Green: settled balance</span> · <span style="color:#62a8ff">Blue: live equity when fully priced</span></div>
       <svg id="equityChart" viewBox="0 0 720 150" role="img" aria-label="Paper account equity history">
         <text x="360" y="78" text-anchor="middle" fill="#a4b4cf" font-size="13">Waiting for saved equity samples</text>
       </svg>
-      <div class="chart-note">Equity includes live bid marks for open positions; displayed history is retained with the paper ledger.</div>
+      <div class="chart-note" id="equityChartStatus">Settled balance excludes unsettled P&amp;L. Live equity includes fresh bid marks only; gaps are not losses or $0 valuations.</div>
     </div>
   </section>
   <div class="section-title"><h2>Model forecast</h2><span>BTC spot inputs · 1-minute updates</span></div>
@@ -108,34 +112,43 @@
   const cls = x => !num(x)?'':Number(x)>0?'positive':Number(x)<0?'negative':'neutral';
   const countdown = x => {if(!num(x))return'—';const s=Math.max(0,Math.floor(Number(x)));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
   function positionCard(p){
-    const pnl=Number(p.unrealizedPnl)||0;
-    return `<div class="position"><div><h3><span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${shares(p.shares)} shares</h3><div class="details">Average entry ${px(p.entryPrice)} · cost ${money(p.totalCost)} · fee ${money(p.fees)}<br>Signal: ${esc(p.signalSource||'—')} ${num(p.modelProbabilityUp)?`· UP ${(p.modelProbabilityUp*100).toFixed(1)}% / DOWN ${(p.modelProbabilityDown*100).toFixed(1)}%`:''}</div></div><div class="value ${cls(pnl)}">${signed(pnl)}<small>floating P&amp;L</small></div></div>`;
+    const pnl=num(p.unrealizedPnl)?Number(p.unrealizedPnl):null;
+    return `<div class="position"><div><h3><span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${shares(p.shares)} shares</h3><div class="details">Average entry ${px(p.entryPrice)} · cost ${money(p.totalCost)} · fee ${money(p.fees)}<br>Signal: ${esc(p.signalSource||'—')} ${num(p.modelProbabilityUp)?`· UP ${(p.modelProbabilityUp*100).toFixed(1)}% / DOWN ${(p.modelProbabilityDown*100).toFixed(1)}%`:''}</div></div><div class="value ${cls(pnl)}">${signed(pnl)}<small>${pnl===null?'waiting for a fresh bid':'floating P&amp;L'}</small></div></div>`;
   }
   function row(p,pending=false){
     const val=pending?'At risk '+money(p.totalCost):signed(p.realizedPnl);
     const outcome=pending?'Pending resolution':p.status==='CLOSED_FLIP'?'FLIP EXIT':p.status==='RESOLVED_WIN'?'WIN':p.status==='RESOLVED_LOSS'?'LOSS':p.status;
     return `<div class="row ${pending?'pending':Number(p.realizedPnl)>0?'win':Number(p.realizedPnl)<0?'loss':''}"><div class="row-title">${esc(p.asset)} <span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${outcome}</div><div class="row-detail">${time(p.windowStart)} · ${shares(p.originalShares||p.shares)} shares · in ${px(p.entryPrice)} · cost ${money(p.totalCost)}${pending?'':` · out ${px(p.exitPrice)} · ${time(p.exitAt)}`}</div><div class="row-pnl ${pending?'':cls(p.realizedPnl)}">${val}</div></div>`;
   }
-  function renderEquityChart(points, initialCapital, currentEquity){
+  function renderEquityChart(points, initialCapital, currentEquity, settledPoints, now){
     const svg=$('equityChart');
     const data=(Array.isArray(points)?points:[]).filter(p=>num(p.at)&&num(p.equity))
+      .map(p=>({at:Number(p.at),equity:Number(p.equity)}))
       .sort((a,b)=>Number(a.at)-Number(b.at));
-    if(num(currentEquity)&&data.length)data[data.length-1]={...data[data.length-1],equity:Number(currentEquity)};
-    if(data.length<2){svg.innerHTML='<text x="360" y="78" text-anchor="middle" fill="#a4b4cf" font-size="13">Waiting for more equity samples</text>';$('equityRange').textContent=data.length?'1 sample':'—';return}
-    const step=Math.max(1,Math.ceil(data.length/180));
-    const sampled=data.filter((_,i)=>i===0||i===data.length-1||i%step===0);
-    const values=sampled.map(p=>Number(p.equity));
+    if(num(currentEquity)&&num(now)){
+      const point={at:Number(now),equity:Number(currentEquity)};
+      if(data.at(-1)?.at===point.at)data[data.length-1]=point;else data.push(point);
+    }
+    const settled=(Array.isArray(settledPoints)?settledPoints:[])
+      .filter(p=>num(p.at)&&num(p.equity)).map(p=>({at:Number(p.at),equity:Number(p.equity)}))
+      .sort((a,b)=>a.at-b.at);
+    const all=[...data,...settled];
+    if(!all.length){svg.innerHTML='<text x="360" y="78" text-anchor="middle" fill="#a4b4cf" font-size="13">Waiting for account history</text>';$('equityRange').textContent='—';return}
+    const values=all.map(p=>p.equity);
     if(num(initialCapital))values.push(Number(initialCapital));
     let low=Math.min(...values),high=Math.max(...values);
     if(high-low<0.01){low-=1;high+=1}
     const left=10,right=710,top=12,bottom=124;
-    const coords=sampled.map((p,i)=>({x:left+i/(sampled.length-1)*(right-left),y:bottom-(Number(p.equity)-low)/(high-low)*(bottom-top)}));
-    const line=coords.map((p,i)=>`${i?'L':'M'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-    const area=`${line} L${coords[coords.length-1].x.toFixed(1)},${bottom} L${coords[0].x.toFixed(1)},${bottom} Z`;
+    const firstAt=Math.min(...all.map(p=>p.at)),lastAt=Math.max(firstAt+1,Number(now)||0,...all.map(p=>p.at));
+    const x=p=>(left+(p.at-firstAt)/(lastAt-firstAt)*(right-left)).toFixed(1);
+    const y=value=>(bottom-(value-low)/(high-low)*(bottom-top)).toFixed(1);
+    // Never connect separate runs of live marks across unpriced periods.
+    const line=data.map((p,i)=>`${!i||p.at-data[i-1].at>45000?'M':'L'}${x(p)},${y(p.equity)}`).join(' ');
+    const settledLine=settled.map((p,i)=>i?`H${x(p)} V${y(p.equity)}`:`M${x(p)},${y(p.equity)}`).join(' ');
     const baseline=num(initialCapital)?bottom-(Number(initialCapital)-low)/(high-low)*(bottom-top):null;
-    const first=money(sampled[0].equity),last=money(sampled[sampled.length-1].equity);
-    svg.innerHTML=`<defs><linearGradient id="equityFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#62a8ff" stop-opacity=".32"/><stop offset="1" stop-color="#62a8ff" stop-opacity=".02"/></linearGradient></defs><line class="chart-grid" x1="${left}" y1="${top}" x2="${right}" y2="${top}"/><line class="chart-grid" x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}"/>${baseline!==null?`<line class="chart-baseline" x1="${left}" y1="${baseline.toFixed(1)}" x2="${right}" y2="${baseline.toFixed(1)}"/>`:''}<path class="chart-area" d="${area}"/><path class="chart-line" d="${line}"/><circle class="chart-dot" cx="${coords.at(-1).x.toFixed(1)}" cy="${coords.at(-1).y.toFixed(1)}" r="5"/><text x="${left}" y="145" fill="#a4b4cf" font-size="11">${esc(first)}</text><text x="${right}" y="145" text-anchor="end" fill="#a4b4cf" font-size="11">${esc(last)}</text>`;
-    $('equityRange').textContent=`${sampled.length} points · ${time(sampled[0].at)}–${time(sampled.at(-1).at)}`;
+    const last=settled.at(-1)||data.at(-1);
+    svg.innerHTML=`<line class="chart-grid" x1="${left}" y1="${top}" x2="${right}" y2="${top}"/><line class="chart-grid" x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}"/>${baseline!==null?`<line class="chart-baseline" x1="${left}" y1="${baseline.toFixed(1)}" x2="${right}" y2="${baseline.toFixed(1)}"/>`:''}<path class="chart-line" d="${line}"/><path class="chart-settled" fill="none" stroke="#39e0a1" stroke-width="3" stroke-linejoin="round" d="${settledLine}"/><circle class="chart-dot" cx="${x(last)}" cy="${y(last.equity)}" r="5"/><text x="${left}" y="145" fill="#a4b4cf" font-size="13">${esc(time(firstAt))}</text><text x="${right}" y="145" text-anchor="end" fill="#a4b4cf" font-size="13">${esc(time(lastAt))}</text>`;
+    $('equityRange').textContent=`Settled ${money(settled.at(-1)?.equity)} · ${data.length} live samples`;
   }
   function auditBook(book,label){
     if(!book)return `${label}: no quote`;
@@ -159,13 +172,21 @@
   }
   function render(s){
     const a=s.account||{}, f=s.freqai||{}, market=(s.markets||[]).find(m=>m.asset==='BTC'&&m.timeframe==='5m');
-    $('equity').textContent=money(a.equity);
-    const total=num(a.equity)&&num(a.initialCapital)?Number(a.equity)-Number(a.initialCapital):null;
-    $('totalPnl').textContent=signed(total);$('totalPnl').className='pnl '+cls(total);
-    $('cash').textContent=money(a.availableCash??a.cash);$('openPnl').textContent=signed(a.unrealizedPnl);$('openPnl').className=cls(a.unrealizedPnl);
+    const complete=num(a.equity),v=a.valuation||{},settled=num(a.settledBalance)?Number(a.settledBalance):num(a.initialCapital)&&num(a.realizedPnl)?Number(a.initialCapital)+Number(a.realizedPnl):null;
+    $('equityLabel').textContent=complete?'Paper account equity':'Settled balance · live valuation pending';
+    $('equity').textContent=money(complete?a.equity:settled);
+    const total=complete&&num(a.initialCapital)?Number(a.equity)-Number(a.initialCapital):a.realizedPnl;
+    $('totalPnl').textContent=signed(total)+(complete?' total P&L':' realized P&L');$('totalPnl').className='pnl '+cls(total);
+    $('settledBalance').textContent=money(settled);$('realizedPnl').textContent=signed(a.realizedPnl);$('realizedPnl').className=cls(a.realizedPnl);
+    $('equityStatus').textContent=complete?'Live equity = available cash plus fresh marked position values. Settled balance excludes unsettled P&L.':`${Number(v.pendingPositions||a.pendingResolution||0)} awaiting resolution · ${Number(v.unpricedPositions||0)} unpriced · ${Number(v.pricedPositions||0)} priced. Showing settled balance, not a guessed live equity.`;
+    const openPnl=num(a.unrealizedPnl)?a.unrealizedPnl:Number(v.pricedPositions)>0?v.knownUnrealizedPnl:null;
+    $('openPnlLabel').textContent=complete?'Open P&L':'Priced open P&L · partial';
+    $('cash').textContent=money(a.availableCash??a.cash);$('openPnl').textContent=num(openPnl)?signed(openPnl):'Awaiting valuation';$('openPnl').className=cls(openPnl);
     $('winRate').textContent=num(a.winRate)?Number(a.winRate).toFixed(1)+'%': '—';
     $('tradesFees').textContent=`${Number(a.settledPositions||0)+Number(a.openPositions||0)} · ${money(a.totalFees)}`;
-    renderEquityChart(a.equityCurve,a.initialCapital,a.equity);
+    renderEquityChart(a.equityCurve,a.initialCapital,a.equity,a.settledBalanceCurve,s.now);
+    const lastLive=(a.equityCurve||[]).at(-1);
+    $('equityChartStatus').textContent=(complete?'Live equity is fully priced.':`Live equity incomplete; last valid sample ${time(lastLive?.at)}. Gaps are missing valuations, not $0 losses.`)+' Green settled balance updates on official settlements; blue shows valid live marks only.'+(a.settlementHistoryIncomplete?' Some older settlements have no valid timestamp; their historical path is unavailable.':'');
     const p=f.prediction, d=s.currentDecision;
     $('recovery').textContent='Flat 100 shares · no recovery sizing or signal selling · hold fills to resolution';
     $('modelStatus').textContent=String(f.status||'WAITING').replace(/_/g,' ');
