@@ -84,8 +84,57 @@ class FreqAIWindowStrategy(IStrategy):
     def populate_indicators(
         self, dataframe: DataFrame, metadata: dict
     ) -> DataFrame:
+        dataframe = self._inject_intrabar_candle(dataframe)
         dataframe = self.freqai.start(dataframe, metadata, self)
         self._export_latest_prediction(dataframe)
+        return dataframe
+
+    def _inject_intrabar_candle(self, dataframe: DataFrame) -> DataFrame:
+        """Replace the active OHLCV row with the fresh Binance one-minute stream bar."""
+        self._intrabar_candle_start = None
+        self._intrabar_observed_at = None
+        candle_path = os.environ.get("FREQAI_INTRABAR_CANDLE_FILE")
+        if not candle_path or dataframe.empty:
+            return dataframe
+        try:
+            candle = json.loads(Path(candle_path).read_text(encoding="utf-8"))
+            start = int(candle["start"])
+            observed = int(candle["observedAt"])
+            now = int(datetime.now(timezone.utc).timestamp() * 1000)
+            open_price, high, low, close, volume = (
+                float(candle[name]) for name in ("open", "high", "low", "close", "volume")
+            )
+            current_minute = now // 60_000 * 60_000
+            if start != current_minute or observed < now - 12_000 or observed > now + 2_000:
+                return dataframe
+            if not all(np.isfinite(value) for value in (open_price, high, low, close, volume)):
+                return dataframe
+            if min(open_price, high, low, close) <= 0 or volume < 0 or low > min(open_price, close) \
+                    or high < max(open_price, close):
+                return dataframe
+            last = dataframe.iloc[-1]
+            last_start = int(pd.to_datetime(last["date"], utc=True).timestamp() * 1000)
+            if last_start > start or (last_start < start and start - last_start != 60_000):
+                return dataframe
+            values = {"open": open_price, "high": high, "low": low,
+                      "close": close, "volume": volume}
+            if last_start == start:
+                row_index = dataframe.index[-1]
+                for name, value in values.items():
+                    dataframe.loc[row_index, name] = value
+            else:
+                new_row = last.copy()
+                new_row["date"] = pd.to_datetime(start, unit="ms", utc=True)
+                for name, value in values.items():
+                    new_row[name] = value
+                dataframe = pd.concat(
+                    [dataframe, pd.DataFrame([new_row], columns=dataframe.columns)],
+                    ignore_index=True,
+                )
+            self._intrabar_candle_start = start
+            self._intrabar_observed_at = observed
+        except (OSError, KeyError, TypeError, ValueError, OverflowError):
+            return dataframe
         return dataframe
 
     def _export_latest_prediction(self, dataframe: DataFrame) -> None:
@@ -123,7 +172,14 @@ class FreqAIWindowStrategy(IStrategy):
             return
         observed_at = int(datetime.now(timezone.utc).timestamp() * 1000)
         candle_close_at = candle_start + 60_000
-        provisional = candle_start <= observed_at < candle_close_at
+        model_candle_observed_at = getattr(self, "_intrabar_observed_at", None)
+        provisional = (
+            model_candle_observed_at is not None
+            and getattr(self, "_intrabar_candle_start", None) == candle_start
+            and candle_start <= model_candle_observed_at < candle_close_at
+            and model_candle_observed_at >= observed_at - 12_000
+            and model_candle_observed_at <= observed_at + 2_000
+        )
         payload = {
             "source": "FREQAI",
             "model": "LightGBMClassifier",
@@ -134,7 +190,7 @@ class FreqAIWindowStrategy(IStrategy):
             "candleCloseAt": candle_close_at,
             "windowStart": candle_start // 300_000 * 300_000,
             "writtenAt": observed_at,
-            "observedAt": observed_at,
+            "observedAt": model_candle_observed_at if provisional else observed_at,
             "provisional": provisional,
         }
         path = Path(prediction_path)

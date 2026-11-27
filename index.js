@@ -42,8 +42,10 @@ async function main() {
   const bot = new Bot({ ledgerStore });
   const savedLedger = ledgerStore?.load() || PaperLedgerStore.decodeBootstrap(process.env.PAPER_LEDGER_BOOTSTRAP);
   await restoreOrResetLedger(bot, savedLedger, Bot.STRATEGY.id);
-  const binanceFeed = new BinanceTickFeed();
   const freqaiWorker = new FreqAIWorker();
+  const binanceFeed = new BinanceTickFeed({
+    intrabarCandlePath: freqaiWorker.intrabarCandlePath,
+  });
   bot.setMarketDataHelpers({ binanceFeed, freqaiWorker });
   freqaiWorker.start();
   void binanceFeed.start().catch((error) => {

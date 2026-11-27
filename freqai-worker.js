@@ -21,6 +21,7 @@ class FreqAIWorker {
     this.dataDir = dataDir;
     this.userDataDir = path.join(dataDir, 'freqai-user-data');
     this.predictionPath = path.join(dataDir, 'freqai', 'latest-prediction.json');
+    this.intrabarCandlePath = path.join(dataDir, 'freqai', 'intrabar-candle.json');
     this.configPath = path.join(rootDir, 'freqai', 'config.json');
     this.strategyPath = path.join(rootDir, 'freqai', 'strategies');
     this.python = python;
@@ -73,6 +74,7 @@ class FreqAIWorker {
         env: {
           ...process.env,
           FREQAI_PREDICTION_FILE: this.predictionPath,
+          FREQAI_INTRABAR_CANDLE_FILE: this.intrabarCandlePath,
           FREQAI_USER_DATA_DIR: this.userDataDir,
         },
         stdio: ['ignore', 'pipe', 'pipe'],

@@ -1,25 +1,38 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
+
 const BINANCE_STREAM_URL = 'wss://data-stream.binance.vision/ws/btcusdt@aggTrade';
 const BINANCE_KLINES_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=8';
+const BINANCE_1M_KLINES_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=3';
 const WINDOW_MS = 5 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
 
 class BinanceTickFeed {
-  constructor({ fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket, now = Date.now } = {}) {
+  constructor({
+    fetchImpl = globalThis.fetch,
+    WebSocketImpl = globalThis.WebSocket,
+    now = Date.now,
+    intrabarCandlePath = null,
+  } = {}) {
     this.fetchImpl = fetchImpl;
     this.WebSocketImpl = WebSocketImpl;
     this.now = now;
+    this.intrabarCandlePath = intrabarCandlePath;
     this.status = 'WAITING';
     this.historyStatus = 'WAITING';
     this.error = null;
     this.price = null;
     this.tickAt = null;
     this.currentCandle = null;
+    this.currentMinuteCandle = null;
     this.candles = [];
     this.recentTrades = [];
     this.socket = null;
     this.retryTimer = null;
     this.historyTimer = null;
+    this.intrabarPublishTimer = null;
     this.stopped = true;
     this.reconnectCount = 0;
   }
@@ -27,18 +40,22 @@ class BinanceTickFeed {
   async start() {
     if (!this.stopped) return;
     this.stopped = false;
-    await this.refreshHistory();
+    await Promise.all([this.refreshHistory(), this.refreshMinuteHistory()]);
     this.connect();
     this.historyTimer = setInterval(() => {
       this.refreshHistory().catch((error) => this.setError(error));
     }, 60 * 1000);
+    this.intrabarPublishTimer = setInterval(() => this.publishIntrabarCandle(), 5_000);
+    this.intrabarPublishTimer.unref?.();
   }
 
   stop() {
     this.stopped = true;
     clearInterval(this.historyTimer);
+    clearInterval(this.intrabarPublishTimer);
     clearTimeout(this.retryTimer);
     this.historyTimer = null;
+    this.intrabarPublishTimer = null;
     this.retryTimer = null;
     if (this.socket) {
       try { this.socket.close(); } catch {}
@@ -89,6 +106,35 @@ class BinanceTickFeed {
       if (this.historyStatus === 'READY') this.error = null;
     } catch (error) {
       this.historyStatus = this.candles.length === 3 ? 'READY' : 'ERROR';
+      this.setError(error);
+    }
+  }
+
+  async refreshMinuteHistory() {
+    if (typeof this.fetchImpl !== 'function') return;
+    try {
+      const response = await this.fetchImpl(BINANCE_1M_KLINES_URL, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!response.ok) throw new Error(`Binance 1-minute candle request failed (${response.status}).`);
+      const rows = await response.json();
+      const now = this.now();
+      const start = Math.floor(now / MINUTE_MS) * MINUTE_MS;
+      const row = rows.find(item => Number(item[0]) === start);
+      if (!row) return;
+      const current = this.currentMinuteCandle?.start === start ? this.currentMinuteCandle : null;
+      this.currentMinuteCandle = {
+        start,
+        open: Number(row[1]),
+        high: Math.max(Number(row[2]), current?.high ?? -Infinity),
+        low: Math.min(Number(row[3]), current?.low ?? Infinity),
+        close: current?.close ?? Number(row[4]),
+        volume: Math.max(Number(row[5]) || 0, current?.volume ?? 0),
+        updatedAt: now,
+        openSource: 'BINANCE_1M_KLINE',
+      };
+    } catch (error) {
       this.setError(error);
     }
   }
@@ -147,6 +193,27 @@ class BinanceTickFeed {
         });
         this.pruneRecentTrades(tickAt);
       }
+      const minuteStart = Math.floor(tickAt / MINUTE_MS) * MINUTE_MS;
+      if (!this.currentMinuteCandle || this.currentMinuteCandle.start !== minuteStart) {
+        const previousMinuteStart = this.currentMinuteCandle?.start;
+        this.currentMinuteCandle = {
+          start: minuteStart,
+          open: price,
+          high: price,
+          low: price,
+          close: price,
+          volume: quantity > 0 ? quantity : 0,
+          updatedAt: tickAt,
+          openSource: 'FIRST_STREAM_TRADE',
+        };
+        if (previousMinuteStart !== minuteStart) void this.refreshMinuteHistory();
+      } else {
+        this.currentMinuteCandle.high = Math.max(this.currentMinuteCandle.high, price);
+        this.currentMinuteCandle.low = Math.min(this.currentMinuteCandle.low, price);
+        this.currentMinuteCandle.close = price;
+        if (quantity > 0) this.currentMinuteCandle.volume += quantity;
+        this.currentMinuteCandle.updatedAt = tickAt;
+      }
       const start = Math.floor(tickAt / WINDOW_MS) * WINDOW_MS;
       if (!this.currentCandle || this.currentCandle.start !== start) {
         const previousStart = this.currentCandle?.start;
@@ -167,6 +234,25 @@ class BinanceTickFeed {
       this.currentCandle.close = price;
     } catch (error) {
       this.setError(error);
+    }
+  }
+
+  publishIntrabarCandle() {
+    const candle = this.currentMinuteCandle;
+    const now = this.now();
+    if (!this.intrabarCandlePath || !candle
+      || now < candle.start || now - candle.updatedAt > 10_000
+      || Math.floor(now / MINUTE_MS) * MINUTE_MS !== candle.start) return false;
+    try {
+      const payload = { ...candle, observedAt: now };
+      fs.mkdirSync(path.dirname(this.intrabarCandlePath), { recursive: true });
+      const temp = `${this.intrabarCandlePath}.${process.pid}.tmp`;
+      fs.writeFileSync(temp, JSON.stringify(payload));
+      fs.renameSync(temp, this.intrabarCandlePath);
+      return true;
+    } catch (error) {
+      this.setError(error);
+      return false;
     }
   }
 
@@ -221,6 +307,7 @@ class BinanceTickFeed {
       tickAt: this.tickAt,
       tickAgeMs,
       currentCandle: this.currentCandle ? { ...this.currentCandle } : null,
+      currentMinuteCandle: this.currentMinuteCandle ? { ...this.currentMinuteCandle } : null,
       candles: this.candles.map((candle) => ({ ...candle })),
       tradeFlow: this.tradeFlow(),
       reconnectCount: this.reconnectCount,
@@ -231,3 +318,4 @@ class BinanceTickFeed {
 module.exports = BinanceTickFeed;
 module.exports.BINANCE_STREAM_URL = BINANCE_STREAM_URL;
 module.exports.BINANCE_KLINES_URL = BINANCE_KLINES_URL;
+module.exports.BINANCE_1M_KLINES_URL = BINANCE_1M_KLINES_URL;

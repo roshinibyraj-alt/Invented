@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { EventEmitter } = require('node:events');
 const FreqAIWorker = require('../freqai-worker');
 
 test('reads and normalizes an atomic current-window FreqAI prediction', (t) => {
@@ -52,5 +53,26 @@ test('marks five-second provisional probabilities and expires them after 12 seco
   now += 12001;
   state = worker.snapshot();
   assert.equal(state.status, 'STALE');
+  worker.stop();
+});
+
+test('passes the shared live-candle file to the FreqAI Python process', (t) => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'invented-freqai-candle-bridge-'));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  let launch;
+  const worker = new FreqAIWorker({
+    dataDir,
+    spawnImpl: (command, args, options) => {
+      launch = { command, args, env: options.env };
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => {};
+      return child;
+    },
+  });
+  worker.start();
+  assert.equal(launch.env.FREQAI_INTRABAR_CANDLE_FILE, worker.intrabarCandlePath);
+  assert.match(worker.intrabarCandlePath, /freqai[/\\]intrabar-candle\.json$/);
   worker.stop();
 });
