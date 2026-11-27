@@ -53,12 +53,13 @@
   <section class="panel model">
     <div class="model-head"><div><div class="model-name">Freqtrade FreqAI · LightGBM</div><div class="model-note" id="modelNote">Waiting for model startup…</div></div><span class="badge warn" id="modelStatus">WARMING</span></div>
     <div class="probs">
-      <div class="prob up"><span>UP PROBABILITY</span><strong id="pUp">—</strong></div>
-      <div class="prob down"><span>DOWN PROBABILITY</span><strong id="pDown">—</strong></div>
+      <div class="prob up"><span>ADJUSTED UP PROBABILITY</span><strong id="pUp">—</strong></div>
+      <div class="prob down"><span>ADJUSTED DOWN PROBABILITY</span><strong id="pDown">—</strong></div>
     </div>
     <div class="bar"><i id="probBar" style="width:50%"></i></div>
     <div style="font:850 32px var(--mono);margin-top:12px">100 shares</div>
-    <div class="model-note" id="modelDecision">After 45 seconds, a score above 70% and a best ask below $0.50 buys 100 shares. Opposite qualifying scores can reverse the position.</div>
+    <div class="model-note" id="modelDecision">After 45 seconds, a score above 65% and a best ask below $0.50 buys 100 shares. Opposite qualifying scores can reverse the position.</div>
+    <div class="model-note" id="scoreAdjustment">Waiting for a closed one-minute baseline score.</div>
     <div class="model-note" id="recovery">100 shares per entry · repeated reversals allowed · no TP or SL.</div>
   </section>
   <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
@@ -70,7 +71,7 @@
   <div class="section-title"><h2>Taker order history</h2><span id="auditSummary">0 actions</span></div>
   <section class="panel">
     <div class="model-note" id="reserved">Available $0.00 · 100 shares per entry · repeated reversals allowed</div>
-    <div class="audit-list" id="auditTrail" style="margin-top:12px"><div class="empty">Waiting for a current-window signal above 70% with a best ask below $0.50.</div></div>
+    <div class="audit-list" id="auditTrail" style="margin-top:12px"><div class="empty">Waiting for a current-window adjusted signal above 65% with a best ask below $0.50.</div></div>
   </section>
   <section class="grid two">
     <article>
@@ -90,7 +91,8 @@
     <div class="label">Strategy details</div>
     <h2>BTC model signals with 100-share taker buys</h2>
     <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Labels are the direction of the enclosing 5-minute BTC candle at its close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
-    <p>After at least 45 seconds, require a fresh current-window probability strictly above 70% and the selected side’s best ask strictly below $0.50. Request 100 shares immediately; the ask gate uses the best ask, while execution sweeps visible asks and reports the weighted average. The unchanged model normally supplies its first usable current-window forecast after the first minute closes.</p>
+    <p>After at least 45 seconds, require an adjusted current-window probability strictly above 65% and the selected side’s best ask strictly below $0.50. Request 100 shares immediately; the ask gate uses the best ask, while execution sweeps visible asks and reports the weighted average.</p>
+    <p>Each closed one-minute prediction is saved as the baseline. At the first five-second score in the next minute, save that provisional score as the reference. Every five seconds after that, add the provisional UP-score change since that reference to the closed baseline; DOWN remains its complement. Clamp the adjusted UP score to 0–100%. The score is not eligible for trading until the immediately preceding closed minute belongs to the same five-minute window.</p>
     <p>Repeated reversals are allowed with no per-window flip limit. When the opposite side independently passes both gates, sweep the held side’s visible bids to sell it, then request 100 shares on the opposite side. If the sell only partially fills, keep the unsold shares and wait for another qualifying tick before buying the other side.</p>
     <p>Taker fees are included in cost and P&amp;L for buys and sells: shares × market fee rate × price × (1 − price), calculated for each fill. BTC 5-minute markets default to a 0.05 fee rate. No maker rebates are credited. Paper execution cannot guarantee live fills.</p>
     <p>No take-profit, stop-loss or recovery sizing. If no qualifying opposite signal closes the position, hold it to official resolution. Freqtrade remains prediction-only in dry mode; no live orders are sent.</p>
@@ -113,7 +115,8 @@
   const countdown = x => {if(!num(x))return'—';const s=Math.max(0,Math.floor(Number(x)));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
   function positionCard(p){
     const pnl=num(p.unrealizedPnl)?Number(p.unrealizedPnl):null;
-    return `<div class="position"><div><h3><span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${shares(p.shares)} shares</h3><div class="details">Average entry ${px(p.entryPrice)} · cost ${money(p.totalCost)} · fee ${money(p.fees)}<br>Signal: ${esc(p.signalSource||'—')} ${num(p.modelProbabilityUp)?`· UP ${(p.modelProbabilityUp*100).toFixed(1)}% / DOWN ${(p.modelProbabilityDown*100).toFixed(1)}%`:''}</div></div><div class="value ${cls(pnl)}">${signed(pnl)}<small>${pnl===null?'waiting for a fresh bid':'floating P&amp;L'}</small></div></div>`;
+    const scoreDetail=num(p.baselineProbabilityUp)?`<br>Closed anchor UP ${(Number(p.baselineProbabilityUp)*100).toFixed(1)}% · intrabar change ${Number(p.intraminuteProbabilityDelta||0)>=0?'+':''}${(Number(p.intraminuteProbabilityDelta||0)*100).toFixed(1)} pts`:'';
+    return `<div class="position"><div><h3><span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${shares(p.shares)} shares</h3><div class="details">Average entry ${px(p.entryPrice)} · cost ${money(p.totalCost)} · fee ${money(p.fees)}<br>Signal: ${esc(p.signalSource||'—')} ${num(p.modelProbabilityUp)?`· UP ${(p.modelProbabilityUp*100).toFixed(1)}% / DOWN ${(p.modelProbabilityDown*100).toFixed(1)}%`:''}${scoreDetail}</div></div><div class="value ${cls(pnl)}">${signed(pnl)}<small>${pnl===null?'waiting for a fresh bid':'floating P&amp;L'}</small></div></div>`;
   }
   function row(p,pending=false){
     const val=pending?'At risk '+money(p.totalCost):signed(p.realizedPnl);
@@ -191,12 +194,20 @@
     $('recovery').textContent='100 shares per entry · repeated signal reversals allowed · no recovery sizing, TP or SL';
     $('modelStatus').textContent=String(f.status||'WAITING').replace(/_/g,' ');
     $('modelStatus').className='badge '+(f.status==='READY'?'':'warn');
-    $('modelNote').textContent=f.lastError?`Model worker: ${f.lastError}`:(p?.provisional?`EXPERIMENTAL intrabar score · refreshed ${time(p.observedAt)} · in-progress 1-minute candle; may fluctuate and is not calibrated.`:p?`Closed 1-minute candle score from ${esc(p.model||'FreqAI')} · candle ${time(p.candleStart)}`:'FreqAI is training or waiting for its next 1-minute candle.');
+    $('modelNote').textContent=f.lastError?`Model worker: ${f.lastError}`:(p?.provisional?`EXPERIMENTAL adjusted intrabar score · refreshed ${time(p.observedAt)} · based on a closed-candle baseline and live score change.`:p?`Closed 1-minute candle baseline from ${esc(p.model||'FreqAI')} · candle ${time(p.candleStart)}`:(f.scoreAdjustment?.mode==='WAITING_FOR_CLOSED_1M_BASELINE'?'Waiting for a closed one-minute baseline in this five-minute window.':'FreqAI is training or waiting for its next one-minute score.'));
     const display=p;
     if(display&&num(display.pUp)&&num(display.pDown)){
       $('pUp').textContent=(Number(display.pUp)*100).toFixed(1)+'%';$('pDown').textContent=(Number(display.pDown)*100).toFixed(1)+'%';$('probBar').style.width=(Number(display.pUp)*100).toFixed(1)+'%';
     }else{$('pUp').textContent='—';$('pDown').textContent='—';$('probBar').style.width='50%'}
-    $('modelDecision').textContent='After 45 seconds: buy 100 when that side scores >70% and its best ask is <$0.50. An opposite qualifying signal sells the held side at bids, then buys 100 opposite; repeated reversals are allowed.';
+    $('modelDecision').textContent='After 45 seconds: buy 100 when the adjusted score is >65% and that side’s best ask is <$0.50. An opposite qualifying signal sells the held side at bids, then buys 100 opposite; repeated reversals are allowed.';
+    const adjustment=f.scoreAdjustment||{};
+    if(adjustment.ready){
+      const baseline=Number(adjustment.baselinePUp),rawUp=Number(adjustment.rawPUp),adjusted=Number(adjustment.adjustedPUp);
+      const delta=Number(adjustment.deltaPUp||0)*100;
+      $('scoreAdjustment').textContent=adjustment.mode==='CLOSED_1M_BASELINE'
+        ? `Closed 1m baseline: UP ${(baseline*100).toFixed(1)}% / DOWN ${(Number(adjustment.baselinePDown)*100).toFixed(1)}%. Current adjusted score starts here.`
+        : `Closed 1m baseline UP ${(baseline*100).toFixed(1)}% · raw intrabar UP ${(rawUp*100).toFixed(1)}% · move since minute start ${delta>=0?'+':''}${delta.toFixed(1)} pts · adjusted UP ${(adjusted*100).toFixed(1)}% / DOWN ${(Number(adjustment.adjustedPDown)*100).toFixed(1)}%.`;
+    }else{$('scoreAdjustment').textContent=adjustment.reason||'Waiting for a closed one-minute baseline score in this five-minute window.'}
     if(market){
       $('windowTitle').textContent=market.marketStatus||'—';$('windowMeta').textContent=`${time(market.start)} – ${time(market.end)} · ${esc(market.marketStatus||'')}`;$('clock').textContent=countdown(market.secondsRemaining);
       $('quotes').innerHTML=['UP','DOWN'].map(side=>{const q=market.sideStates?.[side]||{};return `<div class="quote ${side.toLowerCase()}"><div class="quote-head"><span>${side}</span><span class="muted">${q.fresh?'LIVE':'STALE'}</span></div><div class="quote-prices"><div>BEST BID<b>${px(q.bestBid)}</b></div><div>BEST ASK<b>${px(q.bestAsk)}</b></div><div>MID<b>${px(q.mid)}</b></div></div></div>`}).join('');
@@ -213,7 +224,7 @@
     const orders=s.orders||[];
     $('auditSummary').textContent=orders.length+' actions';
     $('reserved').textContent='Available '+money(a.availableCash)+' · 100 shares per entry · repeated reversals allowed · no resting orders';
-    $('auditTrail').innerHTML=orders.length?orders.slice(0,16).map(o=>{const selling=(o.action||o.type)==='SELL_TAKER';const kind=selling?'SELL':'BUY';const amount=selling?money(o.netProceeds):money(o.totalCost);return `<article class="audit"><div class="audit-head"><b>${kind} <span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))}</b><strong>${px(o.fillPrice)}</strong></div><div class="model-note">Signal ${(Number(o.signalProbability)*100).toFixed(1)}% ${selling?`· opposite ${esc(o.signalSide||'—')} ask ${px(o.signalAsk)}`:`· best ask ${px(o.signalAsk)}`}<br>${shares(o.filledShares)} / ${shares(o.requestedShares)} filled · ${shares(o.cancelledShares||0)} cancelled · fees ${money(o.fees)}<br>${selling?'Net proceeds':'Cost'} ${amount} · executed ${time(o.filledAt)} · window ends ${time(o.windowEnd)}</div></article>`}).join(''):'<div class="empty">Waiting for a current-window signal above 70% with a best ask below $0.50.</div>';
+    $('auditTrail').innerHTML=orders.length?orders.slice(0,16).map(o=>{const selling=(o.action||o.type)==='SELL_TAKER';const kind=selling?'SELL':'BUY';const amount=selling?money(o.netProceeds):money(o.totalCost);const prediction=o.prediction||{};const anchor=num(prediction.baselinePUp)?`Closed baseline UP ${(Number(prediction.baselinePUp)*100).toFixed(1)}% · intrabar change ${Number(prediction.adjustmentDelta||0)>=0?'+':''}${(Number(prediction.adjustmentDelta||0)*100).toFixed(1)} pts`:'';return `<article class="audit"><div class="audit-head"><b>${kind} <span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))}</b><strong>${px(o.fillPrice)}</strong></div><div class="model-note">Adjusted signal ${(Number(o.signalProbability)*100).toFixed(1)}% ${selling?`· opposite ${esc(o.signalSide||'—')} ask ${px(o.signalAsk)}`:`· best ask ${px(o.signalAsk)}`}<br>${anchor?anchor+'<br>':''}${shares(o.filledShares)} / ${shares(o.requestedShares)} filled · ${shares(o.cancelledShares||0)} cancelled · fees ${money(o.fees)}<br>${selling?'Net proceeds':'Cost'} ${amount} · executed ${time(o.filledAt)} · window ends ${time(o.windowEnd)}</div></article>`}).join(''):'<div class="empty">Waiting for a current-window signal above 65% with a best ask below $0.50.</div>';
     const ws=s.websocket||{};$('socket').textContent=`CLOB ${ws.status||'—'} · ${time(s.now)}`;
     const lp=s.ledgerPersistence||{};$('ledger').textContent='Paper ledger '+(lp.error?`save error: ${lp.error}`:lp.enabled?`saved ${time(lp.lastSavedAt)}`:'not persistent');
     $('status').textContent=s.status||'—';$('status').className='badge '+(/ERROR|BLOCKED/i.test(s.status||'')?'bad':s.status==='RUNNING'?'':'warn');

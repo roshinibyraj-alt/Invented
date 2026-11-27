@@ -34,6 +34,12 @@ class FreqAIWorker {
     this.restartTimer = null;
     this.stopped = true;
     this.lastPrediction = null;
+    this.rawPrediction = null;
+    this.lastClosedPrediction = null;
+    this.provisionalReference = null;
+    this.scoreAdjustment = { ready: false, reason: 'Waiting for a closed one-minute baseline.' };
+    this.closedPredictionHistory = [];
+    this.scoreHistory = [];
     this.lastError = null;
     this.status = 'STOPPED';
     this.startedAt = null;
@@ -121,6 +127,52 @@ class FreqAIWorker {
     this.restartTimer.unref?.();
   }
 
+  normalizePrediction(raw, now, provisional = raw?.provisional === true) {
+    if (!raw || raw.doPredict !== true) return null;
+    const rawUp = Number(raw.pUp), rawDown = Number(raw.pDown);
+    const rawStart = Number(raw.candleStart);
+    const windowStart = Number(raw.windowStart);
+    if (!Number.isFinite(rawUp) || !Number.isFinite(rawDown)
+      || rawUp < 0 || rawDown < 0 || rawUp + rawDown <= 0
+      || !Number.isFinite(rawStart) || !Number.isFinite(windowStart)) return null;
+    const candleStart = provisional
+      ? Math.floor(now / 60_000) * 60_000
+      : Math.floor(rawStart / 60_000) * 60_000;
+    if (provisional && Math.floor(rawStart / 60_000) * 60_000 !== candleStart) return null;
+    const total = rawUp + rawDown;
+    return {
+      source: 'FREQAI',
+      pUp: rawUp / total,
+      pDown: rawDown / total,
+      candleStart,
+      candleCloseAt: candleStart + 60_000,
+      windowStart,
+      writtenAt: Number(raw.writtenAt) || now,
+      observedAt: Number(raw.observedAt) || Number(raw.writtenAt) || now,
+      provisional,
+      model: String(raw.model || 'LightGBMClassifier'),
+    };
+  }
+
+  rememberClosedPrediction(prediction) {
+    if (!prediction || prediction.candleCloseAt > this.now() + 1000) return;
+    if (this.lastClosedPrediction
+      && prediction.candleCloseAt < this.lastClosedPrediction.candleCloseAt) return;
+    if (!this.lastClosedPrediction
+      || prediction.candleCloseAt > this.lastClosedPrediction.candleCloseAt) {
+      this.closedPredictionHistory.push({
+        candleStart: prediction.candleStart,
+        candleCloseAt: prediction.candleCloseAt,
+        windowStart: prediction.windowStart,
+        pUp: prediction.pUp,
+        pDown: prediction.pDown,
+        observedAt: prediction.observedAt,
+      });
+      this.closedPredictionHistory = this.closedPredictionHistory.slice(-20);
+    }
+    this.lastClosedPrediction = { ...prediction, provisional: false };
+  }
+
   refreshPrediction() {
     let raw;
     try {
@@ -132,44 +184,101 @@ class FreqAIWorker {
       }
       return;
     }
-    const pUp = Number(raw.pUp);
-    const pDown = Number(raw.pDown);
-    const rawCandleStart = Number(raw.candleStart);
     const provisional = raw.provisional === true;
-    const candleStart = provisional
-      ? Math.floor(this.now() / 60_000) * 60_000
-      : rawCandleStart;
-    const candleCloseAt = provisional ? candleStart + 60_000 : Number(raw.candleCloseAt);
-    const windowStart = Number(raw.windowStart);
-    if (raw.doPredict !== true
-      || !Number.isFinite(pUp) || !Number.isFinite(pDown)
-      || pUp < 0 || pDown < 0 || pUp + pDown <= 0
-      || !Number.isFinite(candleStart)
-      || !Number.isFinite(candleCloseAt)
-      || !Number.isFinite(windowStart)) {
+    const now = this.now();
+    const closedRaw = raw.closedPrediction
+      || (!provisional ? raw : null);
+    const closedPrediction = this.normalizePrediction(closedRaw, now, false);
+    if (closedPrediction) this.rememberClosedPrediction(closedPrediction);
+
+    const current = this.normalizePrediction(raw, now, provisional);
+    if (!current) {
+      this.rawPrediction = null;
+      this.lastPrediction = null;
+      this.scoreAdjustment = {
+        ready: false, reason: 'The latest FreqAI output is not a valid prediction.',
+      };
       if (this.child) this.status = 'TRAINING';
       else if (this.status !== 'STOPPED' && !['ERROR', 'RESTARTING'].includes(this.status)) {
         this.status = 'WAITING';
       }
       return;
     }
-    const total = pUp + pDown;
-    this.lastPrediction = {
-      source: 'FREQAI',
-      pUp: pUp / total,
-      pDown: pDown / total,
-      side: pUp >= pDown ? 'UP' : 'DOWN',
-      candleStart,
-      candleCloseAt,
-      windowStart,
-      writtenAt: Number(raw.writtenAt) || this.now(),
-      observedAt: Number(raw.observedAt) || Number(raw.writtenAt) || this.now(),
-      provisional,
-      model: String(raw.model || 'LightGBMClassifier'),
-    };
-    const ageMs = this.now() - this.lastPrediction.candleStart;
-    const predictionAgeMs = this.now() - this.lastPrediction.observedAt;
-    const maxPredictionAgeMs = this.lastPrediction.provisional ? 12_000 : 120_000;
+    this.rawPrediction = current;
+
+    if (!provisional) {
+      this.rememberClosedPrediction(current);
+      this.lastPrediction = {
+        ...current, side: current.pUp >= current.pDown ? 'UP' : 'DOWN',
+        rawPUp: current.pUp, rawPDown: current.pDown,
+        baselinePUp: current.pUp, baselinePDown: current.pDown,
+        adjustmentDelta: 0, adjustmentReady: true, scoreMode: 'CLOSED_1M_BASELINE',
+      };
+      this.scoreAdjustment = {
+        ready: true, mode: 'CLOSED_1M_BASELINE',
+        closedCandleStart: current.candleStart,
+        baselinePUp: current.pUp, baselinePDown: current.pDown,
+        rawPUp: current.pUp, rawPDown: current.pDown,
+        deltaPUp: 0, adjustedPUp: current.pUp, adjustedPDown: current.pDown,
+        observedAt: current.observedAt,
+      };
+    } else {
+      if (!this.provisionalReference
+        || this.provisionalReference.candleStart !== current.candleStart) {
+        this.provisionalReference = {
+          candleStart: current.candleStart,
+          pUp: current.pUp,
+          pDown: current.pDown,
+          observedAt: current.observedAt,
+        };
+      }
+      const baseline = this.lastClosedPrediction;
+      const hasAdjacentBaseline = baseline
+        && baseline.windowStart === current.windowStart
+        && baseline.candleCloseAt === current.candleStart;
+      if (!hasAdjacentBaseline) {
+        this.lastPrediction = null;
+        this.scoreAdjustment = {
+          ready: false, mode: 'WAITING_FOR_CLOSED_1M_BASELINE',
+          reason: 'Waiting for the immediately preceding closed one-minute score in this five-minute window.',
+          rawPUp: current.pUp, rawPDown: current.pDown,
+          candleStart: current.candleStart, observedAt: current.observedAt,
+        };
+      } else {
+        const deltaPUp = current.pUp - this.provisionalReference.pUp;
+        const adjustedPUp = Math.max(0, Math.min(1, baseline.pUp + deltaPUp));
+        const adjustedPDown = 1 - adjustedPUp;
+        this.lastPrediction = {
+          ...current, pUp: adjustedPUp, pDown: adjustedPDown,
+          side: adjustedPUp >= adjustedPDown ? 'UP' : 'DOWN',
+          rawPUp: current.pUp, rawPDown: current.pDown,
+          baselinePUp: baseline.pUp, baselinePDown: baseline.pDown,
+          referencePUp: this.provisionalReference.pUp,
+          referencePDown: this.provisionalReference.pDown,
+          adjustmentDelta: deltaPUp, adjustmentReady: true,
+          scoreMode: 'CLOSED_BASELINE_PLUS_INTRAMINUTE_DELTA',
+        };
+        this.scoreAdjustment = {
+          ready: true, mode: 'CLOSED_BASELINE_PLUS_INTRAMINUTE_DELTA',
+          closedCandleStart: baseline.candleStart,
+          baselinePUp: baseline.pUp, baselinePDown: baseline.pDown,
+          referencePUp: this.provisionalReference.pUp,
+          referencePDown: this.provisionalReference.pDown,
+          rawPUp: current.pUp, rawPDown: current.pDown,
+          deltaPUp, adjustedPUp, adjustedPDown,
+          observedAt: current.observedAt, candleStart: current.candleStart,
+        };
+        if (!this.scoreHistory.length
+          || this.scoreHistory[this.scoreHistory.length - 1].observedAt !== current.observedAt) {
+          this.scoreHistory.push({ ...this.scoreAdjustment });
+          this.scoreHistory = this.scoreHistory.slice(-60);
+        }
+      }
+    }
+
+    const ageMs = now - current.candleStart;
+    const predictionAgeMs = now - current.observedAt;
+    const maxPredictionAgeMs = provisional ? 12_000 : 120_000;
     this.status = ageMs <= 120_000 && ageMs >= -5000
       && predictionAgeMs <= maxPredictionAgeMs && predictionAgeMs >= -5000
       ? 'READY'
@@ -184,6 +293,11 @@ class FreqAIWorker {
       startedAt: this.startedAt,
       restartCount: this.restartCount,
       lastPrediction: this.lastPrediction ? { ...this.lastPrediction } : null,
+      rawPrediction: this.rawPrediction ? { ...this.rawPrediction } : null,
+      lastClosedPrediction: this.lastClosedPrediction ? { ...this.lastClosedPrediction } : null,
+      closedPredictionHistory: this.closedPredictionHistory.map(item => ({ ...item })),
+      scoreAdjustment: { ...this.scoreAdjustment },
+      scoreHistory: this.scoreHistory.map(item => ({ ...item })),
       scoreCadence: 'FreqAI is polled every second; the strategy emits interim-candle scores on the five-second Freqtrade loop.',
       execution: 'Prediction process only; all Polymarket execution stays in the paper bot.',
     };

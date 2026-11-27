@@ -121,6 +121,7 @@ class IntrabarPredictionExportTest(unittest.TestCase):
                 self.assertEqual(first["pUp"], .61)
                 self.assertEqual(first["observedAt"], start + 25_000)
                 self.assertEqual(first["candleCloseAt"], start + 60_000)
+                self.assertIsNone(first["closedPrediction"])
 
                 row["UP"], row["DOWN"] = .73, .27
                 FakeClock.now_ms += 5_000
@@ -139,6 +140,9 @@ class IntrabarPredictionExportTest(unittest.TestCase):
                 closed = json.loads(Path(prediction_path).read_text())
                 self.assertFalse(closed["provisional"])
                 self.assertEqual(closed["candleStart"], start)
+                self.assertEqual(closed["closedPrediction"]["candleStart"], start)
+                self.assertEqual(closed["closedPrediction"]["pUp"], .73)
+                self.assertFalse(closed["closedPrediction"]["provisional"])
             finally:
                 if old_path is None:
                     os.environ.pop("FREQAI_PREDICTION_FILE", None)

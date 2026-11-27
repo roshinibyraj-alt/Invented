@@ -157,7 +157,11 @@ class FreqAIRestingBTCBot extends DipBounceBot {
     s.strategy = { ...STRATEGY };
     s.freqai = {
       status: worker.status || 'WAITING_FOR_MODEL', lastError: worker.lastError || null,
-      prediction: p, latestPrediction: worker.lastPrediction || null,
+      prediction: p, latestPrediction: worker.rawPrediction || worker.lastPrediction || null,
+      closedPrediction: worker.lastClosedPrediction || null,
+      closedPredictionHistory: worker.closedPredictionHistory || [],
+      scoreAdjustment: worker.scoreAdjustment || null,
+      scoreHistory: worker.scoreHistory || [],
       model: 'Freqtrade FreqAI LightGBMClassifier',
       input: 'Existing Binance 1-minute OHLCV model; no Polymarket pressure inputs.',
       warmupFallback: 'Disabled; fresh current-window FreqAI is required.',

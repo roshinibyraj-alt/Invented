@@ -4,21 +4,21 @@ const DipBounceBot = require('./dip-bounce-bot');
 const { planTakerBuy, planTakerSell } = require('./taker-fill');
 const { currentPrediction } = PreviousBot._test;
 const BASE_SHARES = 100;
-const MIN_PROBABILITY = 0.70;
+const MIN_PROBABILITY = 0.65;
 const MAX_BEST_ASK = 0.50;
 const STRATEGY = Object.freeze({
   ...PreviousBot.STRATEGY,
-  id: 'invented-freqai70-taker-flip100-intrabar5s-v3',
-  name: 'Invented BTC FreqAI 70% price-gated taker flips',
-  version: 'taker-flip100-intrabar5s-v3',
-  scoring: 'The existing LightGBM model is re-evaluated about every five seconds on the in-progress Binance 1-minute candle. These provisional probabilities were trained from completed candles and are experimental, not calibrated.',
-  prediction: 'The existing FreqAI score, strictly above 70%, selects UP or DOWN. No Binance fallback.',
+  id: 'invented-freqai65-closed-anchor-flip100-intrabar5s-v4',
+  name: 'Invented BTC FreqAI closed-anchor 65% paper flips',
+  version: 'closed-anchor-flip100-intrabar5s-v4',
+  scoring: 'Save each closed one-minute model score as the anchor. Every five seconds, adjust it by the change in the current provisional score since that minute first appeared. This completed-candle-trained model remains experimental and uncalibrated intrabar.',
+  prediction: 'The existing FreqAI score, strictly above 65%, selects UP or DOWN. Intrabar scores must be adjusted from a matching, immediately preceding closed one-minute baseline.',
   execution: 'Paper-only immediate taker buys and sells; no live orders.',
-  entry: 'After the 45-second wait, buy 100 shares when the selected side score is strictly above 70% and its fresh best ask is strictly below $0.50.',
+  entry: 'After the 45-second wait, buy 100 shares when the adjusted selected-side score is strictly above 65% and its fresh best ask is strictly below $0.50.',
   fill: 'Sweep fresh visible asks for buys and bids for sells, using weighted fills and market-specific taker fees. Unfilled quantities are cancelled; a partially sold position is retried on a later qualifying tick.',
   cadence: 'Repeated same-window reversals are allowed with no flip-count limit. One open side at a time; after the old side is fully sold, buy 100 shares on the qualifying opposite side.',
   sizing: 'Flat 100 shares requested for every entry, including each reversal; actual fills depend on visible liquidity.',
-  exit: 'An opposite score above 70% plus its best ask below $0.50 sells the held side and buys 100 on the opposite side. Otherwise hold to official resolution. No TP or SL.',
+  exit: 'An opposite adjusted score above 65% plus its best ask below $0.50 sells the held side and buys 100 on the opposite side. Otherwise hold to official resolution. No TP or SL.',
 });
 
 class FreqAITakerBTCBot extends PreviousBot {
@@ -28,7 +28,7 @@ class FreqAITakerBTCBot extends PreviousBot {
     this.strategyDefinition = STRATEGY;
     // The inherited lifecycle calls expiry; taker orders have no live remainder.
     this.restingEngine = { expire() {} };
-    this.statusReason = 'Waiting 45 seconds, then require a fresh FreqAI score above 70% and best ask below $0.50.';
+    this.statusReason = 'Waiting 45 seconds, then require an adjusted FreqAI score above 65% and best ask below $0.50.';
   }
 
   availableCash() { return this.cash; }
@@ -52,7 +52,10 @@ class FreqAITakerBTCBot extends PreviousBot {
   processSide(record) {
     const now = this.now(), m = record.market;
     if (!m) return;
-    const p = currentPrediction(this.freqaiWorker?.snapshot?.()?.lastPrediction, m, now);
+    const worker = this.freqaiWorker?.snapshot?.();
+    const rawPrediction = worker?.lastPrediction;
+    if (rawPrediction?.provisional && rawPrediction.adjustmentReady !== true) return;
+    const p = currentPrediction(rawPrediction, m, now);
     if (!p || !(p.probability > MIN_PROBABILITY)) return;
     const marketId = String(m.id || m.slug), windowStart = Number(m.start);
     const targetQuote = record.quotes?.[p.side];
@@ -110,6 +113,9 @@ class FreqAITakerBTCBot extends PreviousBot {
       tokenId: order.tokenId, side: p.side, status: 'OPEN', entryAt: now,
       windowStart, windowEnd: Number(m.end), requestedShares: BASE_SHARES,
       signalSource: 'FREQAI', modelProbabilityUp: p.pUp, modelProbabilityDown: p.pDown,
+      baselineProbabilityUp: p.baselinePUp ?? p.pUp,
+      rawProbabilityUp: p.rawPUp ?? p.pUp,
+      intraminuteProbabilityDelta: p.adjustmentDelta ?? 0,
       selectedProbability: p.probability, estimatedMakerRebate: 0,
       originalShares: fill.shares, entryFees: fill.fees,
       markStatus: fill.markBid == null ? 'STALE' : 'LIVE',

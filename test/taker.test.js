@@ -51,10 +51,10 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     assert.equal(f.bot.snapshot().restingOrderSummary, undefined);
   });
 
-  test(label + ': strict above 70%, 45-second delay, and no old-window or stale score fallback', () => {
+  test(label + ': strict above 65%, 45-second delay, and no old-window or stale score fallback', () => {
     const f = fixture(); f.time(f.start + 44999); f.score(.9); f.book(); f.check();
     assert.equal(f.trades().length, 0);
-    f.time(f.start + 45000); f.score(.3); f.book(); f.book('DOWN'); f.check();
+    f.time(f.start + 45000); f.score(.35); f.book(); f.book('DOWN'); f.check();
     assert.equal(f.trades().length, 0);
     f.score(.9, { windowStart: f.start - 300000 }); f.check();
     assert.equal(f.trades().length, 0);
@@ -62,13 +62,13 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     assert.equal(f.trades().length, 0);
     f.score(.9, { candleCloseAt: f.now() + 2000 }); f.check();
     assert.equal(f.trades().length, 0);
-    f.score(.29999); f.check(); assert.equal(f.trades().length, 1);
+    f.score(.34999); f.check(); assert.equal(f.trades().length, 1);
   });
 
   test(label + ': accepts fresh five-second provisional scores only for the live one-minute candle', () => {
     const f = fixture();
     f.time(f.start + 45000);
-    f.score(.71, { provisional: true, observedAt: f.now(), writtenAt: f.now(),
+    f.score(.71, { provisional: true, adjustmentReady: true, observedAt: f.now(), writtenAt: f.now(),
       candleStart: f.start, candleCloseAt: f.start + 60000, windowStart: f.start });
     f.book();
     f.check();
@@ -77,7 +77,7 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
 
     const stale = fixture();
     stale.time(stale.start + 45000);
-    stale.score(.9, { provisional: true, observedAt: stale.now() - 13000,
+    stale.score(.9, { provisional: true, adjustmentReady: true, observedAt: stale.now() - 13000,
       writtenAt: stale.now() - 13000, candleStart: stale.start,
       candleCloseAt: stale.start + 60000, windowStart: stale.start });
     stale.book();
@@ -86,7 +86,7 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
 
     const oldMinute = fixture();
     oldMinute.time(oldMinute.start + 75000);
-    oldMinute.score(.9, { provisional: true, observedAt: oldMinute.now(),
+    oldMinute.score(.9, { provisional: true, adjustmentReady: true, observedAt: oldMinute.now(),
       candleStart: oldMinute.start, candleCloseAt: oldMinute.start + 60000,
       windowStart: oldMinute.start });
     oldMinute.book();
@@ -238,7 +238,19 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
   });
 
   test(label + ': live dashboard script renders taker entries, fees and no resting controls', async () => {
-    const f = fixture(); f.check(); const state = f.bot.snapshot();
+    const f = fixture(); f.check();
+    f.bot.freqaiWorker.snapshot = () => ({
+      status: 'READY',
+      lastPrediction: { source: 'FREQAI', pUp: .7, pDown: .3, side: 'UP',
+        probability: .7, candleStart: f.start, candleCloseAt: f.now(),
+        windowStart: f.start, writtenAt: f.now(), observedAt: f.now(), provisional: false },
+      rawPrediction: { pUp: .7, pDown: .3, provisional: false },
+      lastClosedPrediction: { pUp: .66, pDown: .34 },
+      scoreAdjustment: { ready: true, mode: 'CLOSED_BASELINE_PLUS_INTRAMINUTE_DELTA',
+        baselinePUp: .66, baselinePDown: .34, rawPUp: .70, rawPDown: .30,
+        deltaPUp: .04, adjustedPUp: .70, adjustedPDown: .30 },
+    });
+    const state = f.bot.snapshot();
     const html = fs.readFileSync(path.join(root, 'public/freqai-dashboard.html'), 'utf8');
     const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1];
     const elements = new Map();
@@ -260,5 +272,8 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     assert.match(output.innerHTML, /100 \/ 100 filled/);
     assert.match(output.innerHTML, /fees \$1\.20/);
     assert.match(elements.get('modelDecision').textContent, /repeated reversals are allowed/);
+    assert.match(elements.get('scoreAdjustment').textContent, /Closed 1m baseline UP 66\.0%/);
+    assert.match(elements.get('scoreAdjustment').textContent, /adjusted UP 70\.0%/);
+    assert.match(html, /strictly above 65%/);
   });
 }

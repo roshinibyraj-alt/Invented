@@ -216,6 +216,21 @@ class FreqAIWindowStrategy(IStrategy):
             and model_candle_observed_at >= observed_at - 12_000
             and model_candle_observed_at <= observed_at + 2_000
         )
+        if not provisional and do_predict and candle_close_at <= observed_at:
+            total_probability = p_up + p_down
+            if total_probability > 0:
+                self._last_closed_prediction = {
+                    "doPredict": True,
+                    "pUp": p_up / total_probability,
+                    "pDown": p_down / total_probability,
+                    "candleStart": candle_start,
+                    "candleCloseAt": candle_close_at,
+                    "windowStart": candle_start // 300_000 * 300_000,
+                    "writtenAt": observed_at,
+                    "observedAt": observed_at,
+                    "provisional": False,
+                    "model": "LightGBMClassifier",
+                }
         payload = {
             "source": "FREQAI",
             "model": "LightGBMClassifier",
@@ -228,6 +243,7 @@ class FreqAIWindowStrategy(IStrategy):
             "writtenAt": observed_at,
             "observedAt": model_candle_observed_at if provisional else observed_at,
             "provisional": provisional,
+            "closedPrediction": getattr(self, "_last_closed_prediction", None),
         }
         path = Path(prediction_path)
         path.parent.mkdir(parents=True, exist_ok=True)
