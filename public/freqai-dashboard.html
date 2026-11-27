@@ -1,243 +1,309 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#091326">
-  <title>Invented — BTC FreqAI Paper Bot</title>
-  <style>
-    :root{color-scheme:dark;--bg:#091326;--panel:#111f38;--panel2:#172846;--line:#263b5e;--text:#f4f7ff;--muted:#a4b4cf;--green:#39e0a1;--red:#ff7188;--blue:#62a8ff;--yellow:#ffd36b;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% 0,#193662 0,transparent 36%),var(--bg);color:var(--text);font:15px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
-    .wrap{max-width:1020px;margin:0 auto;padding:14px 12px 40px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:3px 0 14px}.brand{display:flex;align-items:center;gap:10px}.logo{display:grid;place-items:center;width:42px;height:42px;border-radius:14px;background:linear-gradient(140deg,#40dcb1,#4b89ff);font-size:22px;font-weight:950;color:#081426}.brand strong{display:block;font-size:20px;letter-spacing:-.04em}.brand small,.muted{color:var(--muted)}.brand small{font-size:12px}
-    .badge{padding:7px 11px;border-radius:999px;background:#193a47;color:var(--green);font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;border:1px solid #286052}.badge.warn{background:#42371d;color:var(--yellow);border-color:#77602c}.badge.bad{background:#482334;color:var(--red);border-color:#754052}
-    .grid{display:grid;gap:12px}.panel{background:linear-gradient(145deg,rgba(23,40,70,.96),rgba(15,29,51,.98));border:1px solid var(--line);border-radius:20px;padding:15px;box-shadow:0 15px 35px #0002}.label{font-size:11px;color:var(--muted);font-weight:850;letter-spacing:.1em;text-transform:uppercase}.equity{background:linear-gradient(135deg,#182b4c,#111d34 70%);border-color:#385584;padding:18px}.money{font:850 clamp(34px,10vw,54px)/1.05 var(--mono);letter-spacing:-.055em;margin-top:5px}.pnl{font:800 20px var(--mono)}.positive{color:var(--green)}.negative{color:var(--red)}.neutral{color:var(--yellow)}.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:15px}.stat{background:#07132666;border:1px solid #263c5c;border-radius:13px;padding:10px}.stat strong{display:block;font:750 18px var(--mono);margin-top:3px;overflow-wrap:anywhere}
-    .section-title{display:flex;justify-content:space-between;align-items:end;gap:10px;margin:23px 2px 10px}.section-title h2{font-size:22px;line-height:1.1;margin:0;letter-spacing:-.04em}.section-title span{font-size:12px;color:var(--muted);text-align:right}.model{border-color:#385584}.model-head{display:flex;justify-content:space-between;gap:10px;align-items:center}.model-name{font-weight:850;font-size:18px}.model-note{font-size:12px;color:var(--muted);margin-top:4px}.probs{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:14px}.prob{padding:14px 12px;border-radius:16px;border:1px solid var(--line);background:#0b1830}.prob.up{border-color:#197b63;background:linear-gradient(145deg,#0d322f,#10233c)}.prob.down{border-color:#8d3e58;background:linear-gradient(145deg,#361c34,#12213a)}.prob span{font-size:12px;font-weight:900;letter-spacing:.09em}.prob strong{display:block;font:900 clamp(29px,9vw,42px)/1.1 var(--mono);margin-top:4px}.bar{height:10px;background:#060f1e;border-radius:20px;overflow:hidden;margin-top:12px}.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--green),var(--blue));border-radius:20px;transition:width .5s}
-    .window-head{display:flex;align-items:start;justify-content:space-between;gap:10px}.window-head h2{margin:0;font-size:21px}.clock{font:850 27px var(--mono);color:var(--yellow);white-space:nowrap}.window-meta{font-size:12px;color:var(--muted);margin-top:4px}.quotes{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:13px}.quote{padding:12px;border:1px solid var(--line);background:#09162b;border-radius:14px}.quote.up{border-left:4px solid var(--green)}.quote.down{border-left:4px solid var(--red)}.quote-head{display:flex;justify-content:space-between;align-items:center;font-weight:900;letter-spacing:.06em}.quote-prices{display:flex;justify-content:space-between;gap:6px;margin-top:8px}.quote-prices div{font-size:11px;color:var(--muted)}.quote-prices b{display:block;font:800 23px var(--mono);color:var(--text)}
-    .position{display:grid;grid-template-columns:1fr auto;gap:8px;background:#0a1730;border:1px solid var(--line);border-radius:15px;padding:13px;margin-top:12px}.position h3{margin:0 0 4px;font-size:16px}.position .details{font-size:12px;color:var(--muted)}.position .value{text-align:right;font:850 21px var(--mono)}.position .value small{display:block;color:var(--muted);font:750 10px var(--sans);text-transform:uppercase}.sideTag{display:inline-block;border-radius:7px;padding:3px 7px;font-size:11px;font-weight:900}.sideTag.UP{background:#12644f;color:#adffe2}.sideTag.DOWN{background:#6a2d47;color:#ffd0dc}
-    .chart-wrap{margin-top:16px;padding-top:13px;border-top:1px solid #304668}.chart-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}.chart-head strong{font-size:13px}.chart-head span,.chart-note{font-size:11px;color:var(--muted)}#equityChart{display:block;width:100%;height:auto;min-height:100px;margin-top:8px;overflow:visible}.chart-grid{stroke:#3a4d6b;stroke-width:1;stroke-dasharray:4 5}.chart-baseline{stroke:#ffd36b;stroke-width:1;stroke-dasharray:5 5}.chart-line{fill:none;stroke:#62a8ff;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}.chart-area{fill:url(#equityFill)}.chart-dot{fill:#39e0a1;stroke:#091326;stroke-width:3}
-    .list{display:grid;gap:8px}.row{background:#0a1730;border-radius:14px;padding:11px;border-left:4px solid var(--line);display:grid;grid-template-columns:1fr auto;gap:5px 8px}.row.win{border-color:var(--green)}.row.loss{border-color:var(--red)}.row.pending{border-color:var(--blue)}.row-title{font-weight:850}.row-detail{font-size:12px;color:var(--muted);overflow-wrap:anywhere}.row-pnl{grid-column:2;grid-row:1/3;align-self:center;text-align:right;font:800 18px var(--mono)}.empty{border:1px dashed #385070;border-radius:14px;padding:14px;text-align:center;color:var(--muted);font-size:13px}
-    .events{display:grid;gap:0}.event{padding:9px 0;border-bottom:1px solid #233653}.event:last-child{border:0}.event time{color:var(--muted);font:700 11px var(--mono)}.event b{display:block;font-size:11px;color:var(--blue);text-transform:uppercase;letter-spacing:.07em}.event p{margin:2px 0 0;overflow-wrap:anywhere}
-    .audit-list{display:grid;gap:9px}.audit-row{background:#0a1730;border:1px solid #2a4165;border-radius:14px;padding:12px}.audit-top{display:flex;justify-content:space-between;align-items:start;gap:8px}.audit-score{font:800 14px var(--mono)}.audit-status{font:800 10px var(--mono);text-align:right;color:var(--yellow);overflow-wrap:anywhere}.audit-meta,.audit-book,.audit-checks{font-size:11px;color:var(--muted);line-height:1.5;margin-top:5px;overflow-wrap:anywhere}.audit-row p{font-size:12px;margin:6px 0 0;color:#e5eaf5}.audit-qualified{color:var(--green)}.audit-no{color:var(--yellow)}
-    .strategy{margin-top:24px;background:linear-gradient(135deg,#162846,#252044);border:1px solid #485181;border-radius:20px;padding:16px}.strategy h2{margin:0 0 8px;font-size:21px}.strategy p{color:#d5dff1;margin:7px 0;font-size:13px}.footer{text-align:center;color:var(--muted);font-size:11px;margin-top:16px}
-    @media(min-width:700px){.wrap{padding:24px 20px 50px}.stats{grid-template-columns:repeat(4,1fr)}.two{grid-template-columns:1.1fr .9fr}.model{padding:20px}.quotes{gap:12px}.panel{padding:18px}}
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>BTC Calibrated Edge · Paper</title>
+<meta name="description" content="Separate BTC 5-minute and 15-minute calibrated LightGBM paper-trading experiments, live quotes, model validation and official settlement results.">
+<meta property="og:title" content="BTC Calibrated Edge · Paper">
+<meta property="og:description" content="Live research dashboard for separate BTC 5m and 15m paper accounts. No live orders or guaranteed returns.">
+<style>
+:root{
+  --paper:#f2ede2; --card:#fbf8f1; --ink:#1d1a16; --mute:#6b6357; --line:#d9d0bf;
+  --sat:#e8860c; --satdeep:#9a5300; --up:#0f7a5c; --upbg:#e1efe7; --down:#b2342a; --downbg:#f6e2dc;
+  --warn:#8a5a00; --warnbg:#fbecc8; --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  --sans:"Avenir Next","Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:16px;-webkit-text-size-adjust:100%}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.35;
+  background-image:radial-gradient(rgba(60,40,10,.08) 1px,transparent 1px);background-size:3px 3px}
+.wrap{max-width:1180px;margin:0 auto;padding:14px 14px 60px;position:relative}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;padding:10px 0 16px;border-bottom:3px solid var(--ink)}
+.mark{width:34px;height:34px;border-radius:50%;background:var(--sat);display:grid;place-items:center;color:var(--card);font-weight:800;font-size:18px;box-shadow:inset 0 0 0 3px var(--satdeep)}
+h1{font-size:20px;margin:0;letter-spacing:-.01em}
+.tag{font-family:var(--mono);font-size:13px;font-weight:700;padding:4px 9px;border-radius:4px;border:1.5px solid var(--ink);letter-spacing:.06em}
+.tag.paper{background:var(--sat);border-color:var(--satdeep);color:#24160a}
+.conn{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:14px;color:var(--mute)}
+.dot{width:11px;height:11px;border-radius:50%;background:var(--mute)}
+.dot.ok{background:var(--up);animation:pulse 2s ease-out infinite}.dot.bad{background:var(--down)}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(15,122,92,.45)}100%{box-shadow:0 0 0 10px rgba(15,122,92,0)}}
+.banner{margin:12px 0 0;padding:11px 14px;border-radius:8px;font-size:15px;line-height:1.4;border-left:5px solid}
+.banner.err{background:var(--downbg);border-color:var(--down);color:#6a1a12}
+.banner.warn{background:var(--warnbg);border-color:var(--sat);color:#5a3a00}
+.hidden{display:none!important}
+.grid{display:grid;grid-template-columns:1fr;gap:16px;margin-top:16px}
+@media(min-width:900px){.grid{grid-template-columns:1fr 1fr}}
+.tf{background:var(--card);border:1.5px solid var(--line);border-radius:14px;overflow:hidden;animation:rise .5s ease both}
+.tf:nth-child(2){animation-delay:.08s}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.tfhead{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:14px 16px;background:var(--ink);color:var(--paper)}
+.tfname{font-family:var(--mono);font-size:30px;font-weight:800;color:var(--sat);line-height:1}
+.mtitle{font-size:14px;color:#cfc6b4;margin-top:6px;line-height:1.3}
+.clock{text-align:right}
+.clock .num{font-size:34px;font-weight:700;line-height:1}
+.clock small{display:block;font-size:13px;color:#cfc6b4;margin-top:4px}
+.bar{height:5px;background:#3a342c}.bar i{display:block;height:100%;background:var(--sat);transform-origin:left;transition:transform 1s linear}
+.sec{padding:14px 16px;border-top:1px solid var(--line)}
+.sec:first-of-type{border-top:0}
+.lbl{font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin-bottom:8px}
+.asks{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.ask{border-radius:10px;padding:12px;border:2px solid transparent;transition:border-color .2s}
+.ask.up{background:var(--upbg);color:var(--up)}.ask.down{background:var(--downbg);color:var(--down)}
+.ask.pick{border-color:currentColor}
+.ask .side{font-weight:800;font-size:15px;letter-spacing:.08em;display:flex;justify-content:space-between}
+.ask .px{font-family:var(--mono);font-size:42px;font-weight:700;line-height:1.1;margin-top:4px;color:var(--ink)}
+.ask .sub{font-size:14px;color:var(--mute);margin-top:2px}
+.prob{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.prob .big{font-family:var(--mono);font-size:38px;font-weight:700}
+.meter{position:relative;height:14px;border-radius:7px;background:linear-gradient(90deg,var(--down) 0,var(--down) 50%,var(--up) 50%,var(--up) 100%);opacity:.9;margin:10px 0 4px}
+.meter .th{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--ink);opacity:.5}
+.meter .nd{position:absolute;top:-5px;width:6px;height:24px;margin-left:-3px;border-radius:3px;background:var(--ink);border:2px solid var(--card);transition:left .6s ease}
+.kv{display:grid;grid-template-columns:repeat(2,1fr);gap:8px 14px}
+@media(min-width:520px){.kv.k3{grid-template-columns:repeat(3,1fr)}}
+.kv div{min-width:0}
+.kv b{display:block;font-family:var(--mono);font-size:20px;font-weight:700;overflow-wrap:anywhere}
+.kv span{font-size:13px;color:var(--mute)}
+.status{font-size:15px;line-height:1.4;padding:10px 12px;border-radius:8px;background:#efe8da}
+.status.go{background:var(--warnbg);color:#5a3a00;font-weight:600}
+.pill{display:inline-block;font-size:13px;font-weight:700;padding:3px 8px;border-radius:999px;letter-spacing:.04em;font-family:var(--mono)}
+.pill.ok{background:var(--upbg);color:var(--up)}.pill.no{background:var(--downbg);color:var(--down)}.pill.w{background:var(--warnbg);color:var(--warn)}
+.pos{border:1.5px solid var(--line);border-radius:10px;padding:12px;margin-top:8px}
+.pos h4{margin:0 0 8px;font-size:16px;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.pos.up{border-left:6px solid var(--up)}.pos.down{border-left:6px solid var(--down)}
+.pnlp{color:var(--up)}.pnln{color:var(--down)}
+.empty{font-size:15px;color:var(--mute);padding:14px;border:1.5px dashed var(--line);border-radius:10px;text-align:center}
+svg.chart{width:100%;height:170px;display:block}
+.legend{display:flex;gap:14px;font-size:13px;color:var(--mute);margin-top:4px;flex-wrap:wrap}
+.legend i{display:inline-block;width:16px;height:3px;vertical-align:middle;margin-right:5px}
+.trades{width:100%;border-collapse:collapse;font-size:14px}
+.trades th{text-align:left;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);padding:6px 4px;border-bottom:1.5px solid var(--line)}
+.trades td{padding:8px 4px;border-bottom:1px solid var(--line);font-family:var(--mono);vertical-align:top}
+.trades tr.w td:first-child{box-shadow:inset 4px 0 var(--up)}.trades tr.l td:first-child{box-shadow:inset 4px 0 var(--down)}
+.tscroll{overflow-x:auto;max-height:340px;overflow-y:auto}
+details summary{cursor:pointer;font-size:15px;font-weight:600;padding:4px 0}
+.panel{background:var(--card);border:1.5px solid var(--line);border-radius:14px;padding:16px;margin-top:16px}
+.panel h2{font-size:18px;margin:0 0 10px}
+.events{list-style:none;margin:0;padding:0;max-height:300px;overflow:auto}
+.events li{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--line);font-size:15px}
+.events time{font-family:var(--mono);color:var(--mute);flex:none}
+.explain p,.explain li{font-size:15px;line-height:1.55}
+.explain ul{padding-left:20px}
+footer{font-size:14px;color:var(--mute);margin-top:18px;line-height:1.5}
+.skel{background:linear-gradient(90deg,#e8e1d2,#f3eee3,#e8e1d2);background-size:200% 100%;animation:sk 1.4s infinite;border-radius:8px;height:22px;margin:6px 0}
+@keyframes sk{to{background-position:-200% 0}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
 </head>
 <body>
-<main class="wrap">
-  <header class="top">
-    <div class="brand"><div class="logo">I</div><div><strong>Invented</strong><small>BTC 5-minute FreqAI paper bot</small></div></div>
-    <span class="badge warn" id="status">CONNECTING</span>
-  </header>
-  <section class="panel equity">
-    <div class="label" id="equityLabel">Paper account equity</div><div class="money" id="equity">—</div>
-    <div class="pnl" id="totalPnl">—</div>
-    <div class="model-note" id="equityStatus" role="status">Waiting for account valuation…</div>
-    <div class="stats">
-      <div class="stat"><span class="label">Available cash</span><strong id="cash">—</strong></div>
-      <div class="stat"><span class="label" id="openPnlLabel">Open P&amp;L</span><strong id="openPnl">—</strong></div>
-      <div class="stat"><span class="label">Settled balance</span><strong id="settledBalance">—</strong></div>
-      <div class="stat"><span class="label">Realized P&amp;L</span><strong id="realizedPnl">—</strong></div>
-      <div class="stat"><span class="label">Win rate</span><strong id="winRate">—</strong></div>
-      <div class="stat"><span class="label">Trades / fees</span><strong id="tradesFees">—</strong></div>
-    </div>
-    <div class="chart-wrap">
-      <div class="chart-head"><strong>Balance &amp; equity history</strong><span id="equityRange">—</span></div>
-      <div class="model-note"><span style="color:#39e0a1">Green: settled balance</span> · <span style="color:#62a8ff">Blue: live equity when fully priced</span></div>
-      <svg id="equityChart" viewBox="0 0 720 150" role="img" aria-label="Paper account equity history">
-        <text x="360" y="78" text-anchor="middle" fill="#a4b4cf" font-size="13">Waiting for saved equity samples</text>
-      </svg>
-      <div class="chart-note" id="equityChartStatus">Settled balance excludes unsettled P&amp;L. Live equity includes fresh bid marks only; gaps are not losses or $0 valuations.</div>
-    </div>
-  </section>
-  <div class="section-title"><h2>Model forecast</h2><span>BTC spot inputs · 1-minute updates</span></div>
-  <section class="panel model">
-    <div class="model-head"><div><div class="model-name">Freqtrade FreqAI · LightGBM</div><div class="model-note" id="modelNote">Waiting for model startup…</div></div><span class="badge warn" id="modelStatus">WARMING</span></div>
-    <div class="probs">
-      <div class="prob up"><span>ADJUSTED UP PROBABILITY</span><strong id="pUp">—</strong></div>
-      <div class="prob down"><span>ADJUSTED DOWN PROBABILITY</span><strong id="pDown">—</strong></div>
-    </div>
-    <div class="bar"><i id="probBar" style="width:50%"></i></div>
-    <div style="font:850 32px var(--mono);margin-top:12px">100 shares</div>
-    <div class="model-note" id="modelDecision">After 45 seconds, a score above 65% and a best ask below $0.50 buys 100 shares. Opposite qualifying scores can reverse the position.</div>
-    <div class="model-note" id="scoreAdjustment">Waiting for a closed one-minute baseline score.</div>
-    <div class="model-note" id="recovery">100 shares per entry · one flip maximum before 4:00 · no TP or SL.</div>
-  </section>
-  <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
-  <section class="panel">
-    <div class="window-head"><div><h2>Bitcoin Up or Down · 5m</h2><div class="window-meta" id="windowMeta">Waiting for current market…</div></div><div class="clock" id="clock">—</div></div>
-    <div class="quotes" id="quotes"><div class="empty">Waiting for current Polymarket book.</div></div>
-    <div id="position"><div class="empty">No entry in this window yet.</div></div>
-  </section>
-  <div class="section-title"><h2>Taker order history</h2><span id="auditSummary">0 actions</span></div>
-  <section class="panel">
-    <div class="model-note" id="reserved">Available $0.00 · 100 shares per entry · one flip maximum before 4:00</div>
-    <div class="audit-list" id="auditTrail" style="margin-top:12px"><div class="empty">Waiting for a current-window adjusted signal above 65% with a best ask below $0.50.</div></div>
-  </section>
-  <section class="grid two">
-    <article>
-      <div class="section-title"><h2>Pending resolution</h2><span id="pendingCount">0</span></div>
-      <div class="list" id="pending"><div class="empty">No positions pending.</div></div>
-    </article>
-    <article>
-      <div class="section-title"><h2>Closed trades</h2><span id="closedCount">0</span></div>
-      <div class="list" id="closed"><div class="empty">No resolved trades yet.</div></div>
-    </article>
-  </section>
-  <section class="panel" style="margin-top:18px">
-    <div class="model-head"><div class="model-name">Recent activity</div><span class="muted" id="socket">—</span></div>
-    <div class="events" id="events"><div class="empty">Waiting for activity.</div></div>
-  </section>
-  <section class="strategy">
-    <div class="label">Strategy details</div>
-    <h2>BTC model signals with 100-share taker buys</h2>
-    <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Labels are the direction of the enclosing 5-minute BTC candle at its close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
-    <p>After at least 45 seconds, require an adjusted current-window probability strictly above 65% and the selected side’s best ask strictly below $0.50. Request 100 shares immediately; the ask gate uses the best ask, while execution sweeps visible asks and reports the weighted average.</p>
-    <p>Each closed one-minute prediction is saved as the baseline. At the first five-second score in the next minute, save that provisional score as the reference. Every five seconds after that, add the provisional UP-score change since that reference to the closed baseline; DOWN remains its complement. Clamp the adjusted UP score to 0–100%. The score is not eligible for trading until the immediately preceding closed minute belongs to the same five-minute window.</p>
-    <p>Only one flip is allowed per five-minute window, strictly before 4:00 elapsed. When the opposite side independently passes both gates, sweep the held side’s visible bids to sell it, then request 100 shares on the opposite side. The first filled reversal sale uses the allowance. Partial-sale retries belong to that same flip, not additional flips, and must also finish before 4:00. At or after 4:00, no further reversal sales or replacement buys execute; hold remaining shares to resolution. The next window gets a fresh allowance.</p>
-    <p>Taker fees are included in cost and P&amp;L for buys and sells: shares × market fee rate × price × (1 − price), calculated for each fill. BTC 5-minute markets default to a 0.05 fee rate. No maker rebates are credited. Paper execution cannot guarantee live fills.</p>
-    <p>No take-profit, stop-loss or recovery sizing. If no qualifying opposite signal closes the position, hold it to official resolution. Freqtrade remains prediction-only in dry mode; no live orders are sent.</p>
-    <p class="muted" id="ledger">Paper ledger —</p>
-  </section>
-  <div class="footer">Paper simulation only · no live orders · Binance is the prediction data source</div>
-</main>
+<div class="wrap">
+<header>
+  <div class="mark">B</div>
+  <h1 id="title">BTC Calibrated Edge</h1>
+  <span class="tag paper">PAPER</span>
+  <span class="tag" id="botStatus">—</span>
+  <div class="conn"><span class="dot" id="dot"></span><span id="connText">Connecting…</span></div>
+</header>
+<div id="connBanner" class="banner err hidden"></div>
+<div id="errBanner" class="banner err hidden"></div>
+<div id="modelBanner" class="banner warn hidden"></div>
+<div id="persistBanner" class="banner warn hidden"></div>
+
+<div class="grid" id="grid">
+  <section class="tf"><div class="sec"><div class="skel"></div><div class="skel"></div><div class="skel" style="height:80px"></div></div></section>
+  <section class="tf"><div class="sec"><div class="skel"></div><div class="skel"></div><div class="skel" style="height:80px"></div></div></section>
+</div>
+
+<section class="panel"><h2>Bot events</h2><ul class="events" id="events"><li class="empty">No events yet.</li></ul></section>
+
+<section class="panel explain" id="explain"><h2>How this strategy works</h2><div id="explainBody"></div></section>
+<footer>Paper simulation only. Nothing here is an order on a real account, and no result shown is a promise of future profit.</footer>
+</div>
+
 <script>
-(() => {
-  const $ = id => document.getElementById(id);
-  const esc = x => String(x ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const num = x => x !== null && x !== undefined && Number.isFinite(Number(x));
-  const money = x => num(x) ? (Number(x)<0?'-$':'$')+Math.abs(Number(x)).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
-  const signed = x => num(x) ? (Number(x)>0?'+':'')+money(x) : '—';
-  const px = x => num(x)?'$'+Number(x).toFixed(3):'—';
-  const shares = x => num(x)?Number(x).toLocaleString(undefined,{maximumFractionDigits:2}):'—';
-  const date = x => {if(!num(x))return null;let n=Number(x);if(n<1e12)n*=1000;return new Date(n)};
-  const time = x => {const d=date(x);return d?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—'};
-  const cls = x => !num(x)?'':Number(x)>0?'positive':Number(x)<0?'negative':'neutral';
-  const countdown = x => {if(!num(x))return'—';const s=Math.max(0,Math.floor(Number(x)));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
-  function positionCard(p){
-    const pnl=num(p.unrealizedPnl)?Number(p.unrealizedPnl):null;
-    const scoreDetail=num(p.baselineProbabilityUp)?`<br>Closed anchor UP ${(Number(p.baselineProbabilityUp)*100).toFixed(1)}% · intrabar change ${Number(p.intraminuteProbabilityDelta||0)>=0?'+':''}${(Number(p.intraminuteProbabilityDelta||0)*100).toFixed(1)} pts`:'';
-    return `<div class="position"><div><h3><span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${shares(p.shares)} shares</h3><div class="details">Average entry ${px(p.entryPrice)} · cost ${money(p.totalCost)} · fee ${money(p.fees)}<br>Signal: ${esc(p.signalSource||'—')} ${num(p.modelProbabilityUp)?`· UP ${(p.modelProbabilityUp*100).toFixed(1)}% / DOWN ${(p.modelProbabilityDown*100).toFixed(1)}%`:''}${scoreDetail}</div></div><div class="value ${cls(pnl)}">${signed(pnl)}<small>${pnl===null?'waiting for a fresh bid':'floating P&amp;L'}</small></div></div>`;
-  }
-  function row(p,pending=false){
-    const val=pending?'At risk '+money(p.totalCost):signed(p.realizedPnl);
-    const outcome=pending?'Pending resolution':p.status==='CLOSED_FLIP'?'FLIP EXIT':p.status==='RESOLVED_WIN'?'WIN':p.status==='RESOLVED_LOSS'?'LOSS':p.status;
-    return `<div class="row ${pending?'pending':Number(p.realizedPnl)>0?'win':Number(p.realizedPnl)<0?'loss':''}"><div class="row-title">${esc(p.asset)} <span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${outcome}</div><div class="row-detail">${time(p.windowStart)} · ${shares(p.originalShares||p.shares)} shares · in ${px(p.entryPrice)} · cost ${money(p.totalCost)}${pending?'':` · out ${px(p.exitPrice)} · ${time(p.exitAt)}`}</div><div class="row-pnl ${pending?'':cls(p.realizedPnl)}">${val}</div></div>`;
-  }
-  function renderEquityChart(points, initialCapital, currentEquity, settledPoints, now){
-    const svg=$('equityChart');
-    const data=(Array.isArray(points)?points:[]).filter(p=>num(p.at)&&num(p.equity))
-      .map(p=>({at:Number(p.at),equity:Number(p.equity)}))
-      .sort((a,b)=>Number(a.at)-Number(b.at));
-    if(num(currentEquity)&&num(now)){
-      const point={at:Number(now),equity:Number(currentEquity)};
-      if(data.at(-1)?.at===point.at)data[data.length-1]=point;else data.push(point);
-    }
-    const settled=(Array.isArray(settledPoints)?settledPoints:[])
-      .filter(p=>num(p.at)&&num(p.equity)).map(p=>({at:Number(p.at),equity:Number(p.equity)}))
-      .sort((a,b)=>a.at-b.at);
-    const all=[...data,...settled];
-    if(!all.length){svg.innerHTML='<text x="360" y="78" text-anchor="middle" fill="#a4b4cf" font-size="13">Waiting for account history</text>';$('equityRange').textContent='—';return}
-    const values=all.map(p=>p.equity);
-    if(num(initialCapital))values.push(Number(initialCapital));
-    let low=Math.min(...values),high=Math.max(...values);
-    if(high-low<0.01){low-=1;high+=1}
-    const left=10,right=710,top=12,bottom=124;
-    const firstAt=Math.min(...all.map(p=>p.at)),lastAt=Math.max(firstAt+1,Number(now)||0,...all.map(p=>p.at));
-    const x=p=>(left+(p.at-firstAt)/(lastAt-firstAt)*(right-left)).toFixed(1);
-    const y=value=>(bottom-(value-low)/(high-low)*(bottom-top)).toFixed(1);
-    // Never connect separate runs of live marks across unpriced periods.
-    const line=data.map((p,i)=>`${!i||p.at-data[i-1].at>45000?'M':'L'}${x(p)},${y(p.equity)}`).join(' ');
-    const settledLine=settled.map((p,i)=>i?`H${x(p)} V${y(p.equity)}`:`M${x(p)},${y(p.equity)}`).join(' ');
-    const baseline=num(initialCapital)?bottom-(Number(initialCapital)-low)/(high-low)*(bottom-top):null;
-    const last=settled.at(-1)||data.at(-1);
-    svg.innerHTML=`<line class="chart-grid" x1="${left}" y1="${top}" x2="${right}" y2="${top}"/><line class="chart-grid" x1="${left}" y1="${bottom}" x2="${right}" y2="${bottom}"/>${baseline!==null?`<line class="chart-baseline" x1="${left}" y1="${baseline.toFixed(1)}" x2="${right}" y2="${baseline.toFixed(1)}"/>`:''}<path class="chart-line" d="${line}"/><path class="chart-settled" fill="none" stroke="#39e0a1" stroke-width="3" stroke-linejoin="round" d="${settledLine}"/><circle class="chart-dot" cx="${x(last)}" cy="${y(last.equity)}" r="5"/><text x="${left}" y="145" fill="#a4b4cf" font-size="13">${esc(time(firstAt))}</text><text x="${right}" y="145" text-anchor="end" fill="#a4b4cf" font-size="13">${esc(time(lastAt))}</text>`;
-    $('equityRange').textContent=`Settled ${money(settled.at(-1)?.equity)} · ${data.length} live samples`;
-  }
-  function auditBook(book,label){
-    if(!book)return `${label}: no quote`;
-    return `${label} bid ${px(book.bestBid)} / ask ${px(book.bestAsk)} · ${shares(book.visibleBidShares)} bid / ${shares(book.visibleAskShares)} ask shares · ${book.fresh?'fresh':`stale ${num(book.ageMs)?Math.max(0,Number(book.ageMs))+'ms':''}`}`;
-  }
-  function auditLabel(code){
-    return ({INITIAL_SIGNAL:'Initial signal',RECOVERY_SIGNAL:'Recovery signal',HOLDING_SAME_SIDE:'Holding same side',
-      FLIP_THRESHOLD_NOT_MET:'Below the 60% flip threshold',FLIP_SIGNAL_QUALIFIED:'Flip signal qualified',
-      FLIP_BLOCKED_HELD_PRICE:'Holding: bid above $0.50',
-      WAITING_FOR_HELD_BIDS:'Waiting for held-side bids',WAITING_FOR_OPPOSITE_ASKS:'Waiting for opposite-side asks',
-      WAITING_FOR_INITIAL_ASKS:'Waiting for entry asks',WAITING_FOR_RECOVERY_DEPTH:'Waiting for recovery depth',
-      WAITING_FOR_PAPER_CASH:'Waiting for paper cash',BLOCKED_INVALID_FEE:'Blocked by invalid fee data',
-      ENTRY_EXECUTED:'Entry filled',FLIP_EXECUTED:'Flip completed'})[code]||String(code||'Score recorded').replaceAll('_',' ').toLowerCase();
-  }
-  function auditCard(a){
-    const probability=a.heldSide&&a.heldSide!==a.predictedSide?a.oppositeProbability:null;
-    const flip=a.flipQualified?`QUALIFIED · ${(Number(probability)*100).toFixed(1)}% opposite`:
-      a.heldSide?`Not qualified · ${num(probability)?(Number(probability)*100).toFixed(1)+'% opposite':'same side held'}`:'No open side at score';
-    const checks=(a.checks||[]).slice(-3).reverse().map(c=>`<div>${time(c.at)} · ${esc(auditLabel(c.status))} · ${esc(c.reason||'')}</div>`).join('');
-    return `<article class="audit-row"><div class="audit-top"><div class="audit-score">${time(a.predictionAt)} · ${esc(a.predictedSide)} · UP ${(Number(a.pUp)*100).toFixed(1)}% / DOWN ${(Number(a.pDown)*100).toFixed(1)}%</div><div class="audit-status">${esc(auditLabel(a.status))}</div></div><div class="audit-meta">Window ${time(a.windowStart)} · candle ${time(a.candleStart)} · held at score ${esc(a.heldSide||'none')} · now ${esc(a.currentHeldSide||'none')} · <span class="${a.flipQualified?'audit-qualified':'audit-no'}">${esc(flip)}</span></div><div class="audit-book">${auditBook(a.heldBook,'Held book')}<br>${auditBook(a.selectedBook,'Selected book')}</div><p>${esc(a.reason||'Score recorded.')}</p><div class="audit-checks">${checks}</div></article>`;
-  }
-  function render(s){
-    const a=s.account||{}, f=s.freqai||{}, market=(s.markets||[]).find(m=>m.asset==='BTC'&&m.timeframe==='5m');
-    const complete=num(a.equity),v=a.valuation||{},settled=num(a.settledBalance)?Number(a.settledBalance):num(a.initialCapital)&&num(a.realizedPnl)?Number(a.initialCapital)+Number(a.realizedPnl):null;
-    $('equityLabel').textContent=complete?'Paper account equity':'Settled balance · live valuation pending';
-    $('equity').textContent=money(complete?a.equity:settled);
-    const total=complete&&num(a.initialCapital)?Number(a.equity)-Number(a.initialCapital):a.realizedPnl;
-    $('totalPnl').textContent=signed(total)+(complete?' total P&L':' realized P&L');$('totalPnl').className='pnl '+cls(total);
-    $('settledBalance').textContent=money(settled);$('realizedPnl').textContent=signed(a.realizedPnl);$('realizedPnl').className=cls(a.realizedPnl);
-    $('equityStatus').textContent=complete?'Live equity = available cash plus fresh marked position values. Settled balance excludes unsettled P&L.':`${Number(v.pendingPositions||a.pendingResolution||0)} awaiting resolution · ${Number(v.unpricedPositions||0)} unpriced · ${Number(v.pricedPositions||0)} priced. Showing settled balance, not a guessed live equity.`;
-    const openPnl=num(a.unrealizedPnl)?a.unrealizedPnl:Number(v.pricedPositions)>0?v.knownUnrealizedPnl:null;
-    $('openPnlLabel').textContent=complete?'Open P&L':'Priced open P&L · partial';
-    $('cash').textContent=money(a.availableCash??a.cash);$('openPnl').textContent=num(openPnl)?signed(openPnl):'Awaiting valuation';$('openPnl').className=cls(openPnl);
-    $('winRate').textContent=num(a.winRate)?Number(a.winRate).toFixed(1)+'%': '—';
-    $('tradesFees').textContent=`${Number(a.settledPositions||0)+Number(a.openPositions||0)} · ${money(a.totalFees)}`;
-    renderEquityChart(a.equityCurve,a.initialCapital,a.equity,a.settledBalanceCurve,s.now);
-    const lastLive=(a.equityCurve||[]).at(-1);
-    $('equityChartStatus').textContent=(complete?'Live equity is fully priced.':`Live equity incomplete; last valid sample ${time(lastLive?.at)}. Gaps are missing valuations, not $0 losses.`)+' Green settled balance updates on official settlements; blue shows valid live marks only.'+(a.settlementHistoryIncomplete?' Some older settlements have no valid timestamp; their historical path is unavailable.':'');
-    const p=f.prediction, d=s.currentDecision;
-    $('recovery').textContent='100 shares per entry · flips used '+Number(s.flipPolicy?.flipsUsed||0)+'/1 · '+(s.flipPolicy?.cutoffReached?'4:00 cutoff reached':'flips only before 4:00')+' · no TP or SL';
-    $('modelStatus').textContent=String(f.status||'WAITING').replace(/_/g,' ');
-    $('modelStatus').className='badge '+(f.status==='READY'?'':'warn');
-    $('modelNote').textContent=f.lastError?`Model worker: ${f.lastError}`:(p?.provisional?`EXPERIMENTAL adjusted intrabar score · refreshed ${time(p.observedAt)} · based on a closed-candle baseline and live score change.`:p?`Closed 1-minute candle baseline from ${esc(p.model||'FreqAI')} · candle ${time(p.candleStart)}`:(f.scoreAdjustment?.mode==='WAITING_FOR_CLOSED_1M_BASELINE'?'Waiting for a closed one-minute baseline in this five-minute window.':'FreqAI is training or waiting for its next one-minute score.'));
-    const display=p;
-    if(display&&num(display.pUp)&&num(display.pDown)){
-      $('pUp').textContent=(Number(display.pUp)*100).toFixed(1)+'%';$('pDown').textContent=(Number(display.pDown)*100).toFixed(1)+'%';$('probBar').style.width=(Number(display.pUp)*100).toFixed(1)+'%';
-    }else{$('pUp').textContent='—';$('pDown').textContent='—';$('probBar').style.width='50%'}
-    $('modelDecision').textContent='After 45 seconds: buy 100 when the adjusted score is >65% and that side’s best ask is <$0.50. At most one flip is allowed, strictly before 4:00 elapsed. Otherwise hold to resolution.';
-    const adjustment=f.scoreAdjustment||{};
-    if(adjustment.ready){
-      const baseline=Number(adjustment.baselinePUp),rawUp=Number(adjustment.rawPUp),adjusted=Number(adjustment.adjustedPUp);
-      const delta=Number(adjustment.deltaPUp||0)*100;
-      $('scoreAdjustment').textContent=adjustment.mode==='CLOSED_1M_BASELINE'
-        ? `Closed 1m baseline: UP ${(baseline*100).toFixed(1)}% / DOWN ${(Number(adjustment.baselinePDown)*100).toFixed(1)}%. Current adjusted score starts here.`
-        : `Closed 1m baseline UP ${(baseline*100).toFixed(1)}% · raw intrabar UP ${(rawUp*100).toFixed(1)}% · move since minute start ${delta>=0?'+':''}${delta.toFixed(1)} pts · adjusted UP ${(adjusted*100).toFixed(1)}% / DOWN ${(Number(adjustment.adjustedPDown)*100).toFixed(1)}%.`;
-    }else{$('scoreAdjustment').textContent=adjustment.reason||'Waiting for a closed one-minute baseline score in this five-minute window.'}
-    if(market){
-      $('windowTitle').textContent=market.marketStatus||'—';$('windowMeta').textContent=`${time(market.start)} – ${time(market.end)} · ${esc(market.marketStatus||'')}`;$('clock').textContent=countdown(market.secondsRemaining);
-      $('quotes').innerHTML=['UP','DOWN'].map(side=>{const q=market.sideStates?.[side]||{};return `<div class="quote ${side.toLowerCase()}"><div class="quote-head"><span>${side}</span><span class="muted">${q.fresh?'LIVE':'STALE'}</span></div><div class="quote-prices"><div>BEST BID<b>${px(q.bestBid)}</b></div><div>BEST ASK<b>${px(q.bestAsk)}</b></div><div>MID<b>${px(q.mid)}</b></div></div></div>`}).join('');
-      const positions=(s.positions||[]).filter(x=>x.status==='OPEN'&&String(x.windowStart)===String(market.start));
-      const state=market.sideStates?.[market.triggeredSide]||null;
-      $('position').innerHTML=positions.length?positions.map(positionCard).join(''):`<div class="empty">${esc(state?.reason||'No filled position in this window yet.')} · ${esc(state?.orderStatus||'WAITING')}</div>`;
-    }else{$('windowTitle').textContent='Searching';$('windowMeta').textContent='No active BTC 5-minute market found.';$('clock').textContent='—';$('quotes').innerHTML='<div class="empty">Waiting for current Polymarket book.</div>';$('position').innerHTML='<div class="empty">No active window.</div>'}
-    const pos=s.positions||[];
-    const pending=pos.filter(x=>x.status==='PENDING_RESOLUTION');
-    const closed=pos.filter(x=>['RESOLVED_WIN','RESOLVED_LOSS','CLOSED_FLIP'].includes(x.status)).sort((x,y)=>Number(y.exitAt||y.resolvedAt||0)-Number(x.exitAt||x.resolvedAt||0));
-    $('pendingCount').textContent=pending.length;$('pending').innerHTML=pending.length?pending.slice(0,10).map(x=>row(x,true)).join(''):'<div class="empty">No positions pending.</div>';
-    $('closedCount').textContent=closed.length;$('closed').innerHTML=closed.length?closed.slice(0,10).map(x=>row(x)).join(''):'<div class="empty">No resolved trades yet.</div>';
-    $('events').innerHTML=(s.events||[]).slice(0,8).map(e=>`<div class="event"><time>${time(e.time)}</time><b>${esc(e.type||'Activity')}</b><p>${esc(e.message||'')}</p></div>`).join('')||'<div class="empty">No recent activity.</div>';
-    const orders=s.orders||[];
-    $('auditSummary').textContent=orders.length+' actions';
-    $('reserved').textContent='Available '+money(a.availableCash)+' · 100 shares per entry · one flip maximum before 4:00 · no resting orders';
-    $('auditTrail').innerHTML=orders.length?orders.slice(0,16).map(o=>{const selling=(o.action||o.type)==='SELL_TAKER';const kind=selling?'SELL':'BUY';const amount=selling?money(o.netProceeds):money(o.totalCost);const prediction=o.prediction||{};const anchor=num(prediction.baselinePUp)?`Closed baseline UP ${(Number(prediction.baselinePUp)*100).toFixed(1)}% · intrabar change ${Number(prediction.adjustmentDelta||0)>=0?'+':''}${(Number(prediction.adjustmentDelta||0)*100).toFixed(1)} pts`:'';return `<article class="audit"><div class="audit-head"><b>${kind} <span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))}</b><strong>${px(o.fillPrice)}</strong></div><div class="model-note">Adjusted signal ${(Number(o.signalProbability)*100).toFixed(1)}% ${selling?`· opposite ${esc(o.signalSide||'—')} ask ${px(o.signalAsk)}`:`· best ask ${px(o.signalAsk)}`}<br>${anchor?anchor+'<br>':''}${shares(o.filledShares)} / ${shares(o.requestedShares)} filled · ${shares(o.cancelledShares||0)} cancelled · fees ${money(o.fees)}<br>${selling?'Net proceeds':'Cost'} ${amount} · executed ${time(o.filledAt)} · window ends ${time(o.windowEnd)}</div></article>`}).join(''):'<div class="empty">Waiting for a current-window signal above 65% with a best ask below $0.50.</div>';
-    const ws=s.websocket||{};$('socket').textContent=`CLOB ${ws.status||'—'} · ${time(s.now)}`;
-    const lp=s.ledgerPersistence||{};$('ledger').textContent='Paper ledger '+(lp.error?`save error: ${lp.error}`:lp.enabled?`saved ${time(lp.lastSavedAt)}`:'not persistent');
-    $('status').textContent=s.status||'—';$('status').className='badge '+(/ERROR|BLOCKED/i.test(s.status||'')?'bad':s.status==='RUNNING'?'':'warn');
-  }
-  let busy=false;
-  async function poll(){
-    if(busy)return;busy=true;
-    try{const r=await fetch('/api/state',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);render(await r.json())}
-    catch(e){$('status').textContent='OFFLINE';$('status').className='badge bad';$('modelNote').textContent='Dashboard state unavailable; retrying.'}
-    finally{busy=false;setTimeout(poll,1000)}
-  }
-  poll();
-})();
+'use strict';
+const TFS=['5m','15m'];
+const API=new URL('api/state',document.baseURI.replace(/[^/]*$/,'')).toString();
+let state=null,lastOk=0,fails=0,lastErr='',clockSkew=0,polling=false;
+const $=id=>document.getElementById(id);
+const esc=v=>String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fin=v=>typeof v==='number'&&Number.isFinite(v);
+const usd=(v,d=2)=>fin(v)?(v<0?'-':'')+'$'+Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d}):'—';
+const sUsd=v=>fin(v)?(v>=0?'+':'')+usd(v):'—';
+const cents=v=>fin(v)?(v*100).toFixed(1)+'¢':'—';
+const pct=(v,d=1)=>fin(v)?(v*100).toFixed(d)+'%':'—';
+const n=(v,d=2)=>fin(v)?v.toFixed(d):'—';
+const pc=v=>fin(v)?(v>0?'pnlp':v<0?'pnln':''):'';
+const tm=t=>fin(t)?new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—';
+const dt=t=>fin(t)?new Date(t).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—';
+const nowS=()=>Date.now()+clockSkew;
+function age(t){if(!fin(t))return '—';const s=Math.max(0,(nowS()-t)/1000);return s<60?s.toFixed(0)+'s ago':s<3600?Math.floor(s/60)+'m '+Math.floor(s%60)+'s ago':(s/3600).toFixed(1)+'h ago'}
+function mmss(ms){if(!fin(ms))return '—';ms=Math.max(0,ms);const s=Math.floor(ms/1000);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')}
+function pill(st){const ok=['READY','RUNNING'].includes(st),no=['ERROR','VALIDATION_REJECTED'].includes(st);return `<span class="pill ${ok?'ok':no?'no':'w'}">${esc(st||'UNKNOWN')}</span>`}
+
+async function poll(){
+  if(polling)return;
+  polling=true;
+  try{
+    const r=await fetch(API,{cache:'no-store',credentials:'include',signal:AbortSignal.timeout(10000)});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const j=await r.json();
+    if(!j||typeof j!=='object')throw new Error('Malformed response');
+    state=j;lastOk=Date.now();fails=0;lastErr='';
+    if(fin(j.now))clockSkew=j.now-Date.now();
+    render();
+  }catch(e){fails++;lastErr=e.message||String(e);}
+  finally{polling=false;}
+  conn();
+}
+function conn(){
+  const ok=fails===0&&lastOk;
+  $('dot').className='dot '+(ok?'ok':(lastOk||fails)?'bad':'');
+  $('connText').textContent=ok?'Live · '+tm(lastOk):fails?'Disconnected':'Connecting…';
+  const b=$('connBanner');
+  if(fails){b.classList.remove('hidden');b.textContent=`Cannot reach ${API} (${lastErr}). ${fails} failed attempt${fails>1?'s':''}. `+(lastOk?`Numbers below are stale, last good update ${age(lastOk-clockSkew+clockSkew)}.`:'No data received yet.');}
+  else b.classList.add('hidden');
+}
+
+function render(){
+  const s=state;
+  $('title').textContent=s.strategy?.name||'BTC Calibrated Edge';
+  $('botStatus').textContent=s.status||'—';
+  const eb=$('errBanner');
+  if(s.lastError||s.status==='ERROR'){eb.classList.remove('hidden');eb.textContent='Bot '+(s.status==='ERROR'?'status ERROR':'last error')+': '+(s.lastError||'unknown');}else eb.classList.add('hidden');
+  const m=s.model||{},mb=$('modelBanner');
+  if(m.status&&m.status!=='RUNNING'){mb.classList.remove('hidden');mb.innerHTML=`Model service ${pill(m.status)} ${esc(m.message||'')} — no entries are taken without a fresh validated prediction.`;}
+  else mb.classList.add('hidden');
+  const p=s.persistence||{},pb=$('persistBanner');
+  if(p.error){pb.classList.remove('hidden');pb.textContent='Ledger save failing: '+p.error;}
+  else if(p.enabled===false){pb.classList.remove('hidden');pb.textContent='Ledger persistence disabled: paper history resets on restart.';}
+  else pb.classList.add('hidden');
+  const opened=[...$('grid').querySelectorAll('details')].map(d=>d.open);
+  const scrolls=[...$('grid').querySelectorAll('.tscroll')].map(d=>[d.scrollLeft,d.scrollTop]);
+  $('grid').innerHTML=TFS.map(tf=>card(tf)).join('');
+  $('grid').querySelectorAll('details').forEach((d,i)=>{d.open=opened[i]||false;});
+  $('grid').querySelectorAll('.tscroll').forEach((d,i)=>{if(scrolls[i]){d.scrollLeft=scrolls[i][0];d.scrollTop=scrolls[i][1];}});
+  renderEvents();renderExplain();tick();
+}
+
+function card(tf){
+  const s=state,rec=s.markets?.[tf]||{},mk=rec.market,acc=s.accounts?.[tf],mod=s.model?.models?.[tf]||{};
+  const pr=mod.prediction,met=mod.metrics;
+  const pick=pr&&fin(pr.pUp)?(pr.pUp>=pr.pDown?'UP':'DOWN'):null;
+  const q=rec.quotes||{};
+  const askBox=side=>{const x=q[side];const cls=side==='UP'?'up':'down';
+    return `<div class="ask ${cls} ${pick===side?'pick':''}"><div class="side"><span>${side}</span><span>${pick===side?'MODEL SIDE':''}</span></div>
+    <div class="px">${x&&fin(x.bestAsk)?cents(x.bestAsk):'—'}</div>
+    <div class="sub">ask · bid ${x&&fin(x.bestBid)?cents(x.bestBid):'—'}</div>
+    <div class="sub" data-age="${x?.updatedAt??''}">${x?age(x.updatedAt):'no book'}</div></div>`};
+  const minP=s.strategy?.minimumProbability??.58;
+  const conf=pr&&pick?(pick==='UP'?pr.pUp:pr.pDown):null;
+  const go=/Qualifying|Filled/.test(rec.status||'');
+  return `<section class="tf">
+  <div class="tfhead"><div><div class="tfname">BTC ${esc(tf)}</div><div class="mtitle">${mk?esc(mk.title):'Discovering market…'}</div></div>
+   <div class="clock"><div class="num" data-end="${mk?.end??''}">—</div><small>${mk?tm(mk.start)+' – '+tm(mk.end):'no window'}</small></div></div>
+  <div class="bar"><i data-s="${mk?.start??''}" data-e="${mk?.end??''}" style="transform:scaleX(0)"></i></div>
+  <div class="sec"><div class="lbl">Executable asks</div><div class="asks">${askBox('UP')}${askBox('DOWN')}</div></div>
+  <div class="sec"><div class="lbl">Calibrated probability ${pill(mod.status)}</div>
+   ${pr&&fin(pr.pUp)?`<div class="prob"><span class="big" style="color:var(--${pick==='UP'?'up':'down'})">${pick} ${pct(conf)}</span><span>raw UP score <b class="num">${pct(pr.rawUp)}</b></span></div>
+   <div class="meter"><span class="th" style="left:${(1-minP)*100}%"></span><span class="th" style="left:${minP*100}%"></span><span class="nd" style="left:${Math.min(100,Math.max(0,pr.pUp*100))}%"></span></div>
+   <div class="kv k3" style="margin-top:10px"><div><b>${pct(pr.pUp)}</b><span>P(UP)</span></div><div><b>${pct(pr.pDown)}</b><span>P(DOWN)</span></div>
+   <div><b data-age="${pr.observedAt}">${age(pr.observedAt)}</b><span>minute closed ${tm(pr.observedAt)}</span></div>
+   <div><b>${fin(pr.spotPrice)?usd(pr.spotPrice):'—'}</b><span>Binance last close</span></div><div><b>${fin(pr.referencePrice)?usd(pr.referencePrice):'—'}</b><span>Binance window open (proxy)</span></div>
+   <div><b>${tm(pr.validUntil)}</b><span>valid until</span></div></div>
+   ${pr.accepted===false?'<div class="status" style="margin-top:8px">Validation rejected: score shown for research only, never traded.</div>':''}`
+   :`<div class="empty">No current prediction. Scores appear after each completed 1-minute candle once the model is validated.</div>`}
+  </div>
+  <div class="sec"><div class="lbl">Bot decision</div><div class="status ${go?'go':''}">${esc(rec.status||'—')}</div>
+   ${rec.pending?`<div class="kv" style="margin-top:8px"><div><b>${esc(rec.pending.side)}</b><span>pending side</span></div><div><b>${tm(rec.pending.at)}</b><span>signal seen</span></div></div>`:''}</div>
+  ${account(tf,acc)}
+  ${validation(met,mod.status)}
+  ${mk?`<div class="sec"><details><summary>Market identifiers</summary><div class="kv" style="margin-top:8px;font-size:13px"><div><b style="font-size:14px">${esc(mk.id)}</b><span>market id</span></div><div><b style="font-size:14px">${esc(mk.slug)}</b><span>slug</span></div><div><b style="font-size:12px">${esc(mk.tokens?.UP)}</b><span>UP token</span></div><div><b style="font-size:12px">${esc(mk.tokens?.DOWN)}</b><span>DOWN token</span></div></div></details></div>`:''}
+  </section>`;
+}
+
+function account(tf,a){
+  if(!a)return `<div class="sec"><div class="empty">Account data unavailable.</div></div>`;
+  const pos=(a.positions||[]).map(p=>{const m=p.mark;const cls=p.side==='UP'?'up':'down';
+    return `<div class="pos ${cls}"><h4><span style="color:var(--${cls})">${esc(p.side)} · ${n(p.shares)} sh</span>${p.status==='AWAITING_RESOLUTION'?'<span class="pill w">PENDING OFFICIAL RESOLUTION</span>':`<span class="pill ok">${esc(p.status)}</span>`}</h4>
+    <div class="kv k3"><div><b>${cents(p.entryPrice)}</b><span>avg entry</span></div><div><b>${usd(p.cost)}</b><span>cost</span></div><div><b>${usd(p.fees,4)}</b><span>fees</span></div>
+    <div><b>${m&&fin(m.bid)?cents(m.bid):'—'}</b><span>best bid</span></div><div><b>${m&&fin(m.value)?usd(m.value):'—'}</b><span>mark (depth, net fee)</span></div>
+    <div><b class="${pc(p.unrealizedPnl)}">${sUsd(p.unrealizedPnl)}</b><span>unrealized P&amp;L</span></div>
+    <div><b>${pct(p.probability)}</b><span>prob at entry</span></div><div><b>${cents(p.netEdge)}</b><span>net edge</span></div><div><b>${tm(p.openedAt)}</b><span>opened</span></div>
+    ${m&&fin(m.unpricedShares)&&m.unpricedShares>1e-6?`<div><b>${n(m.unpricedShares)}</b><span>shares without bid depth</span></div>`:''}</div>
+    ${!m?'<div class="sub" style="margin-top:6px;color:var(--mute);font-size:14px">No fresh mark; equity shown as unknown rather than guessed.</div>':''}</div>`}).join('');
+  const h=a.history||[];
+  const rows=h.map(p=>`<tr class="${p.pnl>0?'w':p.pnl<0?'l':''}"><td style="color:var(--${p.side==='UP'?'up':'down'});font-weight:700">${esc(p.side)}</td><td>${tm(p.openedAt)}<br><span style="color:var(--mute)">${dt(p.windowStart)}</span></td><td>${n(p.shares)}</td><td>${cents(p.entryPrice)}</td><td>${fin(p.exitPrice)?'$'+p.exitPrice.toFixed(2):'—'}<br><span style="color:var(--mute)">won ${esc(p.winner)}</span></td><td>${usd(p.fees,3)}</td><td class="${pc(p.pnl)}" style="font-weight:700">${sUsd(p.pnl)}</td><td>${tm(p.closedAt)}</td></tr>`).join('');
+  return `<div class="sec"><div class="lbl">Paper account · separate ${usd(a.initialCapital,0)}</div>
+   <div class="kv k3"><div><b>${usd(a.cash)}</b><span>cash</span></div><div><b>${usd(a.settledBalance)}</b><span>settled balance</span></div>
+   <div><b>${a.equity==null?'unknown':usd(a.equity)}</b><span>floating equity${a.valuationComplete===false?' (mark missing)':''}</span></div>
+   <div><b class="${pc(a.realizedPnl)}">${sUsd(a.realizedPnl)}</b><span>realized P&amp;L</span></div><div><b class="${pc(a.unrealizedPnl)}">${sUsd(a.unrealizedPnl)}</b><span>unrealized P&amp;L</span></div>
+   <div><b>${usd(a.fees,3)}</b><span>total fees</span></div><div><b>${a.wins??0} / ${a.losses??0}</b><span>wins / losses</span></div><div><b>${a.totalClosed??0}</b><span>closed trades</span></div><div><b>${usd(a.knownPositionValue)}</b><span>known position value</span></div></div></div>
+  <div class="sec"><div class="lbl">Open position</div>${pos||'<div class="empty">Flat. At most one entry per window.</div>'}</div>
+  <div class="sec"><div class="lbl">Equity · ${esc(tf)}</div>${chart(a.equityCurve||[])}</div>
+  <div class="sec"><div class="lbl">Closed trades (official resolution)</div>${h.length?`<div class="tscroll"><table class="trades"><thead><tr><th>Side</th><th>Entry / window</th><th>Sh</th><th>Entry</th><th>Exit</th><th>Fees</th><th>P&amp;L</th><th>Closed</th></tr></thead><tbody>${rows}</tbody></table></div>${a.totalClosed>h.length?`<div class="legend">Showing latest ${h.length} of ${a.totalClosed}.</div>`:''}`:'<div class="empty">No resolved trades yet.</div>'}</div>`;
+}
+
+function chart(c){
+  const pts=c.filter(p=>p&&fin(p.at));
+  if(pts.length<2)return '<div class="empty">Equity samples appear every 15 seconds. Not enough samples yet.</div>';
+  const W=600,H=170,L=58,R=8,T=10,B=24;
+  const t0=pts[0].at,t1=pts[pts.length-1].at||t0+1;
+  const vals=pts.flatMap(p=>[p.equity,p.settledBalance]).filter(fin);
+  if(!vals.length)return '<div class="empty">No valued equity samples yet.</div>';
+  let lo=Math.min(...vals),hi=Math.max(...vals);if(hi-lo<1){lo-=.5;hi+=.5}
+  const pad=(hi-lo)*.08;lo-=pad;hi+=pad;
+  const x=t=>L+(t-t0)/Math.max(1,t1-t0)*(W-L-R),y=v=>T+(hi-v)/(hi-lo)*(H-T-B);
+  const gapMs=60000;
+  const path=k=>{let d='',prev=null;for(const p of pts){const v=p[k];if(!fin(v)){prev=null;continue}
+    const brk=!prev||p.at-prev.at>gapMs;d+=(brk?'M':'L')+x(p.at).toFixed(1)+' '+y(v).toFixed(1)+' ';prev=p;}return d};
+  const ticks=[lo+pad,(lo+hi)/2,hi-pad].map(v=>`<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="#d9d0bf" stroke-dasharray="3 4"/><text x="${L-6}" y="${y(v)+4}" text-anchor="end" font-size="12" fill="#6b6357" font-family="monospace">${v.toFixed(0)}</text>`).join('');
+  const xt=[t0,(t0+t1)/2,t1].map((t,i)=>`<text x="${x(t)}" y="${H-6}" text-anchor="${['start','middle','end'][i]}" font-size="12" fill="#6b6357" font-family="monospace">${new Date(t).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</text>`).join('');
+  const nulls=pts.filter(p=>!fin(p.equity)).length;
+  return `<svg class="chart" role="img" aria-label="Paper equity and settled balance in US dollars over actual elapsed time; unknown marks are gaps" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><title>Equity and settled balance (USD)</title>${ticks}${xt}
+   <path d="${path('settledBalance')}" fill="none" stroke="#9a5300" stroke-width="1.6" stroke-dasharray="5 4" vector-effect="non-scaling-stroke"/>
+   <path d="${path('equity')}" fill="none" stroke="#1d1a16" stroke-width="2.2" vector-effect="non-scaling-stroke"/></svg>
+   <div class="legend"><span><i style="background:var(--ink)"></i>floating equity</span><span><i style="background:var(--satdeep)"></i>settled balance</span><span>${pts.length} samples${nulls?` · ${nulls} unvalued (gaps)`:''}</span></div>`;
+}
+
+function validation(m,status){
+  if(!m)return `<div class="sec"><div class="lbl">Model validation ${pill(status)}</div><div class="empty">Model is training or has not reported validation yet.</div></div>`;
+  const better=fin(m.testBrier)&&fin(m.baselineBrier)&&m.testBrier<m.baselineBrier;
+  return `<div class="sec"><div class="lbl">Model validation ${pill(status)}</div>
+   <div class="kv k3"><div><b class="${better?'pnlp':'pnln'}">${n(m.testBrier,4)}</b><span>test Brier</span></div><div><b>${n(m.baselineBrier,4)}</b><span>baseline Brier</span></div>
+   <div><b>${fin(m.testBrier)&&fin(m.baselineBrier)?(m.baselineBrier-m.testBrier>=0?'-':'+')+Math.abs(m.baselineBrier-m.testBrier).toFixed(4):'—'}</b><span>vs baseline (lower better)</span></div>
+   <div><b>${n(m.testLogLoss,4)}</b><span>test log loss</span></div><div><b>${pct(m.testAccuracy)}</b><span>test accuracy</span></div><div><b>${age(m.trainedAt)}</b><span>trained</span></div>
+   <div><b>${m.trainWindows??'—'} / ${m.calibrationWindows??'—'} / ${m.testWindows??'—'}</b><span>train / calib / test windows</span></div><div><b>${m.testSnapshots??'—'}</b><span>test snapshots</span></div></div>
+   <div class="status" style="margin-top:10px;font-size:14px">${esc(m.split||'')}<br><b>Labels:</b> ${esc(m.labelSource||'Binance proxy')}</div>
+   ${Array.isArray(m.bins)&&m.bins.length?`<details style="margin-top:8px"><summary>Reliability bins</summary><table class="trades"><thead><tr><th>Bin</th><th>n</th><th>Predicted</th><th>Actual</th></tr></thead><tbody>${m.bins.map(b=>`<tr><td>${pct(b.from,0)}+</td><td>${b.count}</td><td>${pct(b.predicted)}</td><td>${pct(b.actual)}</td></tr>`).join('')}</tbody></table></details>`:''}</div>`;
+}
+
+function renderEvents(){
+  const ev=state.events||[];
+  $('events').innerHTML=ev.length?ev.slice(0,60).map(e=>`<li><time>${tm(e.at)}</time><span>${esc(e.message)}</span></li>`).join(''):'<li class="empty">No events yet.</li>';
+}
+function renderExplain(){
+  const s=state.strategy||{};
+  $('explainBody').innerHTML=`<p>Two fully separate paper accounts, ${esc((s.timeframes||TFS).join(' and '))}, each starting with $1,500. Nothing is shared between them.</p><ul>
+  <li><b>Predictions:</b> ${esc(s.predictionRefresh||'')} Scores do not update every few seconds; they refresh only after each completed 1-minute candle.</li>
+  <li><b>Calibration caveat:</b> models are trained and calibrated on Binance BTCUSDT window labels, which are a proxy. They are not verified probabilities of the Chainlink price Polymarket settles on. Trade settlement uses the official Polymarket resolution.</li>
+  <li><b>Entry rule:</b> model confidence at least ${pct(s.minimumProbability??.58,0)} and net edge at least ${cents(s.minimumNetEdge??.04)} per share after modeled fees, walking visible ask depth.</li>
+  <li><b>Sizing:</b> target ${s.targetShares??50} shares, capped at ${pct(s.riskFraction??.02,0)} of account cash. A ${s.latencyMs??500} ms latency check and a fresh book are required before a simulated fill. No new entries in the final 30 seconds.</li>
+  <li><b>Exit:</b> ${esc(s.exit||'')}</li></ul>
+  <p><b>${esc(s.warning||'Research paper experiment. No guaranteed edge.')}</b></p>
+  <p style="color:var(--mute)">Strategy id ${esc(s.id||'—')} · mode ${esc(state.mode||'PAPER')} · ledger saved ${age(state.persistence?.lastSavedAt)}</p>`;
+}
+
+function tick(){
+  const t=nowS();
+  document.querySelectorAll('[data-end]').forEach(el=>{const e=+el.dataset.end;el.textContent=el.dataset.end?mmss(e-t):'—';});
+  document.querySelectorAll('i[data-s]').forEach(el=>{const s=+el.dataset.s,e=+el.dataset.e;if(el.dataset.s&&e>s)el.style.transform=`scaleX(${Math.min(1,Math.max(0,(t-s)/(e-s)))})`;});
+  document.querySelectorAll('[data-age]').forEach(el=>{const a=+el.dataset.age;if(el.dataset.age)el.textContent=age(a);});
+  if(fails)conn();
+}
+setInterval(tick,1000);
+poll();setInterval(poll,2000);
 </script>
 </body>
 </html>

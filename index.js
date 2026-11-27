@@ -27,42 +27,36 @@ async function main() {
     return;
   }
 
-  const Bot = require('./freqai-taker-btc-bot');
+  const { CalibratedBot: Bot } = require('./calibrated-bot');
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
-  const BinanceTickFeed = require('./binance-tick-feed');
-  const FreqAIWorker = require('./freqai-worker');
+  const CalibratedWorker = require('./calibrated-worker');
   const PaperLedgerStore = require('./paper-ledger-store');
   const ledgerPath = process.env.PAPER_LEDGER_PATH || null;
   const ledgerStore = ledgerPath ? new PaperLedgerStore(ledgerPath) : null;
   if (ledgerPath && !fs.existsSync(path.dirname(ledgerStore.filePath))) {
     throw new Error(`Paper-history storage is not mounted at ${path.dirname(ledgerStore.filePath)}.`);
   }
-  const bot = new Bot({ ledgerStore });
+  const worker = new CalibratedWorker({
+    directory: path.join(ledgerPath ? path.dirname(ledgerPath) : require('node:os').tmpdir(), 'calibrated-dual-models'),
+  });
+  const bot = new Bot({ ledgerStore, worker });
   const savedLedger = ledgerStore?.load() || PaperLedgerStore.decodeBootstrap(process.env.PAPER_LEDGER_BOOTSTRAP);
   await restoreOrResetLedger(bot, savedLedger, Bot.STRATEGY.id);
-  const freqaiWorker = new FreqAIWorker();
-  const binanceFeed = new BinanceTickFeed({
-    intrabarCandlePath: freqaiWorker.intrabarCandlePath,
-  });
-  bot.setMarketDataHelpers({ binanceFeed, freqaiWorker });
-  freqaiWorker.start();
-  void binanceFeed.start().catch((error) => {
-    console.error('[binance-feed] Could not start spot feed:', error?.message || error);
-  });
+  await bot.flushLedger();
+  worker.start();
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- >65% FreqAI after 45 seconds, best ask < $0.50; 100 shares; at most one flip strictly before 4:00 elapsed; no live orders.');
+  console.log('MODE: PAPER ONLY -- separate calibrated LightGBM BTC 5m/15m; 50-share target within 2% cash; net edge >=4 cents; hold official resolution.');
 
   let stopping = false;
   const shutdown = async () => {
     if (stopping) return;
     stopping = true;
     bot.stop();
-    freqaiWorker.stop();
-    binanceFeed.stop();
+    worker.stop();
     const forcedExit = setTimeout(() => process.exit(1), 10_000);
     forcedExit.unref?.();
     await bot.flushLedger();

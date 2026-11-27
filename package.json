@@ -1,12 +1,13 @@
 {
-  "name": "invented-freqai-btc-5m-paper-bot",
-  "version": "1.0.0",
+  "name": "invented-calibrated-btc-dual-paper-bot",
+  "version": "2.0.0",
   "private": true,
-  "description": "Paper-only BTC 5-minute direction bot using Freqtrade FreqAI and Binance spot data.",
+  "description": "Separate calibrated LightGBM BTC 5m and 15m paper-trading experiments.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/calibrated.test.js test/calibrated-server.test.js test/wick-market-data.test.js test/paper-ledger-store.test.js",
+    "test:model": "python3 -m unittest discover -s test -p calibrated_model_test.py"
   },
   "engines": {
     "node": ">=22"

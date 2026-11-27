@@ -12,7 +12,8 @@ function startServer(bot, port) {
       const state = bot.snapshot();
       const healthy = state.status !== 'blocked_or_error' && state.status !== 'ERROR';
       res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ ok: healthy, mode: 'DEMO', status: state.status, now: state.now }));
+      res.end(JSON.stringify({ ok: healthy, mode: state.mode, status: state.status,
+        modelStatus: state.model?.status, now: state.now }));
       return;
     }
     if (pathname === '/api/state' || pathname === '/api/strategy/state') {
@@ -22,7 +23,7 @@ function startServer(bot, port) {
       return;
     }
     if (pathname === '/' || pathname === '/index.html') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(INDEX_HTML);
       return;
     }
