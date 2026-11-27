@@ -122,7 +122,8 @@ class FreqAIWindowStrategy(IStrategy):
             return dataframe
         try:
             candle = json.loads(Path(candle_path).read_text(encoding="utf-8"))
-            start = int(candle["start"])
+            raw_start = int(candle["start"])
+            start = raw_start // 60_000 * 60_000
             observed = int(candle["observedAt"])
             now = int(datetime.now(timezone.utc).timestamp() * 1000)
             open_price, high, low, close, volume = (

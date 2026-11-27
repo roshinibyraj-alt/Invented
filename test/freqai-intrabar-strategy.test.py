@@ -210,7 +210,7 @@ class IntrabarPredictionExportTest(unittest.TestCase):
         now = start + 25_000
         old = {"date": RealDateTime.fromtimestamp((start - 60_000) / 1000, timezone.utc),
                "open": 100, "high": 101, "low": 99, "close": 100.5, "volume": 5}
-        candle = {"start": start, "open": 100.5, "high": 101.2, "low": 100.1,
+        candle = {"start": start + 3828, "open": 100.5, "high": 101.2, "low": 100.1,
                   "close": 101, "volume": 7.5, "observedAt": now}
         with tempfile.TemporaryDirectory() as data_dir:
             candle_path = str(Path(data_dir) / "intrabar.json")
