@@ -55,7 +55,7 @@ test('dashboard serves the new FreqAI BTC paper strategy', async t => {
   assert.match(html, /Freqtrade FreqAI/);
   assert.match(html, /UP PROBABILITY/);
   assert.match(html, /DOWN PROBABILITY/);
-  assert.match(html, /100-share resting limits/i);
+  assert.match(html, /100-share taker buys/i);
   assert.match(html, /strictly above 58%/);
   assert.doesNotMatch(html, /window-only recovery flips/i);
   assert.match(html, /id="recovery"/);

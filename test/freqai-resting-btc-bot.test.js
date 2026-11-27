@@ -238,7 +238,7 @@ test('HTTP dashboard state exposes resting limits and no recovery controls', asy
   assert.equal(state.freqai.auditTrail, undefined);
   assert.equal(state.orders[0].depthBudget, undefined);
   const html = await (await fetch(base + '/')).text();
-  assert.match(html, /Resting buy orders/);
+  assert.match(html, /Taker buy orders/);
   assert.match(html, /strictly above 58%/);
   assert.doesNotMatch(html, /<h2>Score &amp; flip audit/);
 });

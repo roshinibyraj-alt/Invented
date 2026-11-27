@@ -54,7 +54,7 @@
     </div>
     <div class="bar"><i id="probBar" style="width:50%"></i></div>
     <div style="font:850 32px var(--mono);margin-top:12px">100 shares</div>
-    <div class="model-note" id="modelDecision">After 45 seconds, a current-window score strictly above 58% places a fixed limit at ask minus $0.10.</div>
+    <div class="model-note" id="modelDecision">After 45 seconds, a current-window score strictly above 58% immediately buys 100 shares at available asks.</div>
     <div class="model-note" id="recovery">No recovery sizing, signal selling, TP or SL.</div>
   </section>
   <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
@@ -63,7 +63,7 @@
     <div class="quotes" id="quotes"><div class="empty">Waiting for current Polymarket book.</div></div>
     <div id="position"><div class="empty">No entry in this window yet.</div></div>
   </section>
-  <div class="section-title"><h2>Resting buy orders</h2><span id="auditSummary">0 active</span></div>
+  <div class="section-title"><h2>Taker buy orders</h2><span id="auditSummary">0 entries</span></div>
   <section class="panel">
     <div class="model-note" id="reserved">Reserved $0.00 · 100 shares per new order</div>
     <div class="audit-list" id="auditTrail" style="margin-top:12px"><div class="empty">Waiting for a current-window signal above 58%.</div></div>
@@ -84,12 +84,12 @@
   </section>
   <section class="strategy">
     <div class="label">Strategy details</div>
-    <h2>BTC model signals with 100-share resting limits</h2>
+    <h2>BTC model signals with 100-share taker buys</h2>
     <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Labels are the direction of the enclosing 5-minute BTC candle at its close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
-    <p>After a minimum of 45 seconds, require a fresh current-window probability strictly above 58%. Place 100 shares at that side’s best ask minus $0.10, rounded down to the market tick. No Binance fallback. The existing prediction model is unchanged, so its first usable current-window forecast normally arrives after the first minute closes.</p>
-    <p>The limit stays fixed when price or same-side confidence changes. Only a fresh opposite score above 58% cancels the unfilled remainder and places a new opposite 100-share limit. Already filled shares are never sold by signal. A fully filled order consumes the window; partial fills remain held even if the remainder is replaced.</p>
-    <p>Orders reserve paper capital and expire at their own window end. Simulated maker fills require subsequent fresh ask depth strictly below the limit. A bid touch or unchanged displayed depth cannot create repeated fills. Queue priority is unknown; these are paper estimates, not guaranteed live fills.</p>
-    <p>Maker fees are zero; no unverified rebate income is credited. Hold filled shares to official resolution, with no take-profit, stop-loss or recovery sizing. Freqtrade remains prediction-only in dry mode; no live orders are sent.</p>
+    <p>After a minimum of 45 seconds, require a fresh current-window probability strictly above 58%. Immediately request 100 shares at available asks. No price offset or Binance fallback. The unchanged model normally supplies its first usable current-window forecast after the first minute closes.</p>
+    <p>One executed entry per window. Sweep fresh visible asks from cheapest upward and show the actual average entry. If depth is insufficient, hold the partial fill and cancel the unfilled remainder immediately; nothing rests or rolls into another window. Opposite signals do not sell or add another entry.</p>
+    <p>Taker fees are included in cost and P&amp;L: shares × market fee rate × price × (1 − price), calculated for each fill. BTC 5-minute markets default to a 0.05 fee rate. No maker rebates are credited. Paper execution cannot guarantee live fills.</p>
+    <p>Hold filled shares to official resolution, with no take-profit, stop-loss or recovery sizing. Freqtrade remains prediction-only in dry mode; no live orders are sent.</p>
     <p class="muted" id="ledger">Paper ledger —</p>
   </section>
   <div class="footer">Paper simulation only · no live orders · Binance is the prediction data source</div>
@@ -175,7 +175,7 @@
     if(display&&num(display.pUp)&&num(display.pDown)){
       $('pUp').textContent=(Number(display.pUp)*100).toFixed(1)+'%';$('pDown').textContent=(Number(display.pDown)*100).toFixed(1)+'%';$('probBar').style.width=(Number(display.pUp)*100).toFixed(1)+'%';
     }else{$('pUp').textContent='—';$('pDown').textContent='—';$('probBar').style.width='50%'}
-    $('modelDecision').textContent='After 45 seconds: current-window score >58% places 100 shares at ask − $0.10. An opposite >58% score replaces only unfilled shares.';
+    $('modelDecision').textContent='After 45 seconds: current-window score >58% immediately buys 100 shares at available asks, including taker fees. One executed entry per window.';
     if(market){
       $('windowTitle').textContent=market.marketStatus||'—';$('windowMeta').textContent=`${time(market.start)} – ${time(market.end)} · ${esc(market.marketStatus||'')}`;$('clock').textContent=countdown(market.secondsRemaining);
       $('quotes').innerHTML=['UP','DOWN'].map(side=>{const q=market.sideStates?.[side]||{};return `<div class="quote ${side.toLowerCase()}"><div class="quote-head"><span>${side}</span><span class="muted">${q.fresh?'LIVE':'STALE'}</span></div><div class="quote-prices"><div>BEST BID<b>${px(q.bestBid)}</b></div><div>BEST ASK<b>${px(q.bestAsk)}</b></div><div>MID<b>${px(q.mid)}</b></div></div></div>`}).join('');
@@ -189,10 +189,10 @@
     $('pendingCount').textContent=pending.length;$('pending').innerHTML=pending.length?pending.slice(0,10).map(x=>row(x,true)).join(''):'<div class="empty">No positions pending.</div>';
     $('closedCount').textContent=closed.length;$('closed').innerHTML=closed.length?closed.slice(0,10).map(x=>row(x)).join(''):'<div class="empty">No resolved trades yet.</div>';
     $('events').innerHTML=(s.events||[]).slice(0,8).map(e=>`<div class="event"><time>${time(e.time)}</time><b>${esc(e.type||'Activity')}</b><p>${esc(e.message||'')}</p></div>`).join('')||'<div class="empty">No recent activity.</div>';
-    const orders=s.orders||[],resting=orders.filter(o=>['RESTING','PARTIAL'].includes(o.status));
-    $('auditSummary').textContent=resting.length+' active';
-    $('reserved').textContent='Reserved '+money(s.restingOrderSummary?.reservedCash??a.reservedCash)+' · available '+money(a.availableCash)+' · 100 shares per new limit';
-    $('auditTrail').innerHTML=orders.length?orders.slice(0,12).map(o=>`<article class="audit"><div class="audit-head"><b><span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))}</b><strong>${px(o.limitPrice)}</strong></div><div class="model-note">Signal ${(Number(o.signalProbability)*100).toFixed(1)}% · ask ${px(o.signalAsk)}<br>${shares(o.filledShares)} / 100 filled · ${shares(o.remainingShares)} resting<br>Placed ${time(o.placedAt)} · expires ${time(o.windowEnd)}</div></article>`).join(''):'<div class="empty">Waiting for a fresh current-window signal above 58%.</div>';
+    const orders=s.orders||[];
+    $('auditSummary').textContent=orders.length+' entries';
+    $('reserved').textContent='Available '+money(a.availableCash)+' · 100 shares per window · no resting orders';
+    $('auditTrail').innerHTML=orders.length?orders.slice(0,12).map(o=>`<article class="audit"><div class="audit-head"><b><span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))}</b><strong>${px(o.fillPrice)}</strong></div><div class="model-note">Signal ${(Number(o.signalProbability)*100).toFixed(1)}% · signal ask ${px(o.signalAsk)}<br>${shares(o.filledShares)} / 100 filled · ${shares(o.cancelledShares||0)} cancelled · fees ${money(o.fees)}<br>Executed ${time(o.filledAt)} · window ends ${time(o.windowEnd)}</div></article>`).join(''):'<div class="empty">Waiting for a fresh current-window signal above 58%.</div>';
     const ws=s.websocket||{};$('socket').textContent=`CLOB ${ws.status||'—'} · ${time(s.now)}`;
     const lp=s.ledgerPersistence||{};$('ledger').textContent='Paper ledger '+(lp.error?`save error: ${lp.error}`:lp.enabled?`saved ${time(lp.lastSavedAt)}`:'not persistent');
     $('status').textContent=s.status||'—';$('status').className='badge '+(/ERROR|BLOCKED/i.test(s.status||'')?'bad':s.status==='RUNNING'?'':'warn');
