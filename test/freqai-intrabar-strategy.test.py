@@ -102,7 +102,7 @@ class IntrabarPredictionExportTest(unittest.TestCase):
         strategy = strategy_class.__new__(strategy_class)
         start = 1_800_000_060_000
         row = {
-            "date": RealDateTime.fromtimestamp(start / 1000, timezone.utc),
+            "date": RealDateTime.fromtimestamp((start + 3828) / 1000, timezone.utc),
             "do_predict": 1,
             "UP": .61,
             "DOWN": .39,
@@ -134,6 +134,7 @@ class IntrabarPredictionExportTest(unittest.TestCase):
                 self.assertNotEqual(second["writtenAt"], first["writtenAt"])
 
                 FakeClock.now_ms = start + 61_000
+                row["date"] = RealDateTime.fromtimestamp(start / 1000, timezone.utc)
                 strategy._export_latest_prediction(FakeDataFrame(row))
                 closed = json.loads(Path(prediction_path).read_text())
                 self.assertFalse(closed["provisional"])

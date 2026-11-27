@@ -172,6 +172,16 @@ class FreqAIWindowStrategy(IStrategy):
             candle_start = int(pd.to_datetime(row["date"], utc=True).timestamp() * 1000)
         except (KeyError, TypeError, ValueError, OverflowError):
             return
+        observed_at = int(datetime.now(timezone.utc).timestamp() * 1000)
+        model_candle_start = getattr(self, "_intrabar_candle_start", None)
+        model_candle_observed_at = getattr(self, "_intrabar_observed_at", None)
+        if (
+            model_candle_start is not None
+            and model_candle_observed_at is not None
+            and model_candle_start == observed_at // 60_000 * 60_000
+            and observed_at - 12_000 <= model_candle_observed_at <= observed_at + 2_000
+        ):
+            candle_start = int(model_candle_start)
         try:
             do_predict = int(row.get("do_predict", 0)) == 1
         except (TypeError, ValueError, OverflowError):
@@ -197,12 +207,10 @@ class FreqAIWindowStrategy(IStrategy):
         prediction_path = os.environ.get("FREQAI_PREDICTION_FILE")
         if not prediction_path:
             return
-        observed_at = int(datetime.now(timezone.utc).timestamp() * 1000)
         candle_close_at = candle_start + 60_000
-        model_candle_observed_at = getattr(self, "_intrabar_observed_at", None)
         provisional = (
             model_candle_observed_at is not None
-            and getattr(self, "_intrabar_candle_start", None) == candle_start
+            and model_candle_start == candle_start
             and candle_start <= model_candle_observed_at < candle_close_at
             and model_candle_observed_at >= observed_at - 12_000
             and model_candle_observed_at <= observed_at + 2_000
