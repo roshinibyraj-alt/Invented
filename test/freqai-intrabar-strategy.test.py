@@ -48,6 +48,17 @@ class FakeIndexer:
         self.frame.rows[index][column] = value
 
 
+class FakeDataProvider:
+    def __init__(self, dataframe):
+        self.dataframe = dataframe
+
+    def current_whitelist(self):
+        return ["BTC/USDT"]
+
+    def get_pair_dataframe(self, pair, timeframe):
+        return FakeDataFrame(self.dataframe.rows, self.dataframe.columns)
+
+
 class FakeClock:
     now_ms = 0
 
@@ -133,13 +144,61 @@ class IntrabarPredictionExportTest(unittest.TestCase):
                 else:
                     os.environ["FREQAI_PREDICTION_FILE"] = old_path
 
-    def test_strategy_runs_indicators_each_bot_loop_without_changing_labels(self):
+    def test_uses_supported_freqai_candle_mode_without_changing_labels(self):
         strategy_class = import_strategy()
-        self.assertFalse(strategy_class.process_only_new_candles)
+        self.assertTrue(strategy_class.process_only_new_candles)
         self.assertEqual(strategy_class.timeframe, "1m")
         source = STRATEGY_PATH.read_text()
         self.assertIn('dataframe["&-window-direction"] = labels', source)
         self.assertNotIn("_last_exported_candle", source)
+        self.assertIn("scored = self.freqai.start(dataframe, {\"pair\": pair}, self)", source)
+
+    def test_loop_hook_calls_freqai_again_for_each_fresh_live_minute(self):
+        strategy_class = import_strategy()
+        strategy = strategy_class.__new__(strategy_class)
+        start = 1_800_000_060_000
+        now = start + 25_000
+        dataframe = FakeDataFrame({
+            "date": RealDateTime.fromtimestamp((start - 60_000) / 1000, timezone.utc),
+            "open": 100, "high": 101, "low": 99, "close": 100.5, "volume": 5,
+            "do_predict": 1, "UP": .61, "DOWN": .39,
+        })
+        strategy.dp = FakeDataProvider(dataframe)
+        calls = []
+        def score(frame, metadata, _strategy):
+            calls.append(metadata["pair"])
+            return frame
+        strategy.freqai = types.SimpleNamespace(start=score)
+        with tempfile.TemporaryDirectory() as data_dir:
+            candle_path = Path(data_dir) / "intrabar.json"
+            prediction_path = Path(data_dir) / "prediction.json"
+            old_candle_path = os.environ.get("FREQAI_INTRABAR_CANDLE_FILE")
+            old_prediction_path = os.environ.get("FREQAI_PREDICTION_FILE")
+            os.environ["FREQAI_INTRABAR_CANDLE_FILE"] = str(candle_path)
+            os.environ["FREQAI_PREDICTION_FILE"] = str(prediction_path)
+            try:
+                FakeClock.now_ms = now
+                for step in (0, 5_000):
+                    candle_path.write_text(json.dumps({
+                        "start": start, "open": 100.5, "high": 101 + step / 100_000,
+                        "low": 100.1, "close": 101 + step / 100_000, "volume": 7.5,
+                        "observedAt": now + step,
+                    }))
+                    FakeClock.now_ms = now + step
+                    strategy.bot_loop_start(FakeClock.now())
+                result = json.loads(prediction_path.read_text())
+                self.assertEqual(calls, ["BTC/USDT", "BTC/USDT"])
+                self.assertTrue(result["provisional"])
+                self.assertEqual(result["observedAt"], now + 5_000)
+            finally:
+                if old_candle_path is None:
+                    os.environ.pop("FREQAI_INTRABAR_CANDLE_FILE", None)
+                else:
+                    os.environ["FREQAI_INTRABAR_CANDLE_FILE"] = old_candle_path
+                if old_prediction_path is None:
+                    os.environ.pop("FREQAI_PREDICTION_FILE", None)
+                else:
+                    os.environ["FREQAI_PREDICTION_FILE"] = old_prediction_path
 
     def test_injects_only_the_fresh_current_binance_minute_candle(self):
         strategy_class = import_strategy()

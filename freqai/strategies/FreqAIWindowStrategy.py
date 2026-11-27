@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -11,14 +12,16 @@ import pandas as pd
 from pandas import DataFrame
 from freqtrade.strategy import IStrategy
 
+logger = logging.getLogger(__name__)
+
 
 class FreqAIWindowStrategy(IStrategy):
     """Prediction-only FreqAI strategy; it never opens Freqtrade orders."""
 
     timeframe = "1m"
-    # Freqtrade's loop is throttled to five seconds. Re-run FreqAI on the
-    # current, still-forming one-minute candle on each loop.
-    process_only_new_candles = False
+    # FreqAI requires this to stay enabled. The explicit loop hook below
+    # requests additional supported inference passes for the live candle.
+    process_only_new_candles = True
     startup_candle_count = 60
     can_short = False
     minimal_roi = {"0": 1000}
@@ -88,6 +91,26 @@ class FreqAIWindowStrategy(IStrategy):
         dataframe = self.freqai.start(dataframe, metadata, self)
         self._export_latest_prediction(dataframe)
         return dataframe
+
+    def bot_loop_start(self, current_time: datetime, **kwargs) -> None:
+        """Re-run the supported FreqAI entry point every bot loop on the live bar."""
+        if not self.dp or not self.freqai:
+            return
+        try:
+            pairs = self.dp.current_whitelist()
+            pair = next((item for item in pairs if item.startswith("BTC/")), None)
+            if not pair:
+                return
+            dataframe = self.dp.get_pair_dataframe(pair=pair, timeframe=self.timeframe)
+            if dataframe is None or dataframe.empty:
+                return
+            dataframe = self._inject_intrabar_candle(dataframe)
+            if self._intrabar_observed_at is None:
+                return
+            scored = self.freqai.start(dataframe, {"pair": pair}, self)
+            self._export_latest_prediction(scored)
+        except Exception:
+            logger.exception("FreqAI intrabar scoring pass failed.")
 
     def _inject_intrabar_candle(self, dataframe: DataFrame) -> DataFrame:
         """Replace the active OHLCV row with the fresh Binance one-minute stream bar."""
