@@ -56,7 +56,14 @@ class FreqAITakerBTCBot extends PreviousBot {
     if (!p || !(p.probability > MIN_PROBABILITY)) return;
     const marketId = String(m.id || m.slug), windowStart = Number(m.start);
     const targetQuote = record.quotes?.[p.side];
-    if (!targetQuote || !Number.isFinite(Number(targetQuote.bestAsk))
+    const quoteAge = Number(targetQuote?.updatedAt) <= now
+      ? now - Number(targetQuote.updatedAt) : Infinity;
+    if (!targetQuote || !Number.isFinite(Number(targetQuote.updatedAt))
+      || quoteAge > 2000
+      || (targetQuote.tokenId && targetQuote.tokenId !== String(m.tokens[p.side]))
+      || (targetQuote.marketId && targetQuote.marketId !== marketId)
+      || (targetQuote.windowStart != null && Number(targetQuote.windowStart) !== windowStart)
+      || !Number.isFinite(Number(targetQuote.bestAsk))
       || !(Number(targetQuote.bestAsk) < MAX_BEST_ASK)) return;
 
     const open = this.positions.filter(position => position.status === 'OPEN'

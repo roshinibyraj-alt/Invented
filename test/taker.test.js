@@ -225,6 +225,18 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     assert.equal(f.orders().filter(order => order.action === 'SELL_TAKER').length, 2);
   });
 
+  test(label + ': stale opposite asks cannot trigger a sale before a new buy', () => {
+    const f = fixture();
+    f.check();
+    f.score(.29);
+    f.book('UP', [{ price: .4, size: 1000 }], [{ price: .3, size: 1000 }]);
+    f.book('DOWN', [{ price: .4, size: 1000 }]);
+    f.record.quotes.DOWN.updatedAt -= 2501;
+    f.check();
+    assert.equal(f.orders().length, 1);
+    assert.equal(f.trades().filter(p => p.status === 'OPEN')[0].side, 'UP');
+  });
+
   test(label + ': live dashboard script renders taker entries, fees and no resting controls', async () => {
     const f = fixture(); f.check(); const state = f.bot.snapshot();
     const html = fs.readFileSync(path.join(root, 'public/freqai-dashboard.html'), 'utf8');
