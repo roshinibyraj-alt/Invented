@@ -6,19 +6,20 @@ const { currentPrediction } = PreviousBot._test;
 const BASE_SHARES = 100;
 const MIN_PROBABILITY = 0.65;
 const MAX_BEST_ASK = 0.50;
+const FLIP_CUTOFF_MS = 240_000;
 const STRATEGY = Object.freeze({
   ...PreviousBot.STRATEGY,
-  id: 'invented-freqai65-closed-anchor-flip100-intrabar5s-v4',
+  id: 'invented-freqai65-closed-anchor-oneflip-before4m-v5',
   name: 'Invented BTC FreqAI closed-anchor 65% paper flips',
-  version: 'closed-anchor-flip100-intrabar5s-v4',
+  version: 'closed-anchor-oneflip-before4m-v5',
   scoring: 'Save each closed one-minute model score as the anchor. Every five seconds, adjust it by the change in the current provisional score since that minute first appeared. This completed-candle-trained model remains experimental and uncalibrated intrabar.',
   prediction: 'The existing FreqAI score, strictly above 65%, selects UP or DOWN. Intrabar scores must be adjusted from a matching, immediately preceding closed one-minute baseline.',
   execution: 'Paper-only immediate taker buys and sells; no live orders.',
   entry: 'After the 45-second wait, buy 100 shares when the adjusted selected-side score is strictly above 65% and its fresh best ask is strictly below $0.50.',
   fill: 'Sweep fresh visible asks for buys and bids for sells, using weighted fills and market-specific taker fees. Unfilled quantities are cancelled; a partially sold position is retried on a later qualifying tick.',
-  cadence: 'Repeated same-window reversals are allowed with no flip-count limit. One open side at a time; after the old side is fully sold, buy 100 shares on the qualifying opposite side.',
+  cadence: 'At most one reversal per five-minute window, strictly before 4:00 elapsed. The first executed reversal sale consumes the allowance; partial-sale retries toward that same opposite side belong to the same flip and must also finish before 4:00. New windows reset the allowance.',
   sizing: 'Flat 100 shares requested for every entry, including each reversal; actual fills depend on visible liquidity.',
-  exit: 'An opposite adjusted score above 65% plus its best ask below $0.50 sells the held side and buys 100 on the opposite side. Otherwise hold to official resolution. No TP or SL.',
+  exit: 'Before 4:00 elapsed and with the one-flip allowance unused, an opposite adjusted score above 65% plus its best ask below $0.50 sells the held side and buys 100 opposite. After a flip or the cutoff, hold remaining shares to official resolution. No TP or SL.',
 });
 
 class FreqAITakerBTCBot extends PreviousBot {
@@ -32,6 +33,18 @@ class FreqAITakerBTCBot extends PreviousBot {
   }
 
   availableCash() { return this.cash; }
+
+  windowFlipState(market) {
+    const orders = market ? this.orders.filter(o => o.marketId === String(market.id || market.slug)
+      && Number(o.windowStart) === Number(market.start)) : [];
+    const buys = orders.filter(o => o.action === 'BUY_TAKER');
+    const sales = orders.filter(o => o.action === 'SELL_TAKER')
+      .sort((a, b) => a.filledAt - b.filledAt);
+    const targetSide = sales[0]?.signalSide || null;
+    return { hasEntry: buys.length > 0, flipsUsed: sales.length ? 1 : 0, targetSide,
+      completed: !!targetSide && buys.some(o => o.side === targetSide
+        && o.filledAt >= sales[0].filledAt) };
+  }
 
   restoreLedger(ledger) {
     for (const o of (ledger?.snapshot || ledger)?.orders || []) {
@@ -72,6 +85,21 @@ class FreqAITakerBTCBot extends PreviousBot {
     const open = this.positions.filter(position => position.status === 'OPEN'
       && position.marketId === marketId && Number(position.windowStart) === windowStart);
     if (open.some(position => position.side === p.side)) return;
+    const flip = this.windowFlipState(m);
+    if (flip.hasEntry) {
+      const reason = now >= windowStart + FLIP_CUTOFF_MS
+        ? 'No flips at or after 4:00 elapsed; hold remaining shares to resolution.'
+        : flip.completed ? 'One flip already used in this window; hold to resolution.'
+        : flip.flipsUsed && p.side !== flip.targetSide
+          ? 'Only completion of the existing flip is allowed; no new reversal.' : null;
+      if (reason) {
+        this.statusReason = reason;
+        record.sideStates[p.side].reason = reason;
+        this.lastDecision = { ...p, at: now, action: 'FLIP_BLOCKED',
+          source: 'FREQAI', windowStart, reason };
+        return;
+      }
+    }
     const opposite = open.filter(position => position.side !== p.side);
     let sellOrderIds = [];
     if (opposite.length) {
@@ -216,6 +244,11 @@ class FreqAITakerBTCBot extends PreviousBot {
   snapshot() {
     const s = super.snapshot();
     s.strategy = { ...STRATEGY };
+    const market = this.records.get('BTC:5m')?.market;
+    const flip = this.windowFlipState(market);
+    s.flipPolicy = { ...flip, maxFlipsPerWindow: 1, cutoffElapsedMs: FLIP_CUTOFF_MS,
+      cutoffAt: market ? Number(market.start) + FLIP_CUTOFF_MS : null,
+      cutoffReached: !!market && this.now() >= Number(market.start) + FLIP_CUTOFF_MS };
     delete s.restingOrderSummary;
     s.takerOrderSummary = {
       entries: this.orders.filter(o => o.action === 'BUY_TAKER').length,
@@ -231,7 +264,9 @@ class FreqAITakerBTCBot extends PreviousBot {
         bestAskMaximumExclusive: MAX_BEST_ASK,
         entryDelayMs: 45_000,
         oneEntryPerWindow: false,
-        repeatedReversals: true,
+        repeatedReversals: false,
+        maxFlipsPerWindow: 1,
+        flipCutoffElapsedMs: FLIP_CUTOFF_MS,
         recoveryEnabled: false,
       });
     }

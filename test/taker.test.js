@@ -167,9 +167,10 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     r.bot.restoreLedger(saved);
     r.check();
     assert.equal(r.trades().filter(p => p.status === 'OPEN').length, 1);
-    assert.equal(r.trades().find(p => p.status === 'OPEN').side, 'UP');
-    assert.equal(r.trades().filter(p => p.status === 'CLOSED_FLIP').length, 2);
-    assert.equal(r.orders().filter(o => o.action === 'SELL_TAKER').length, 2);
+    assert.equal(r.trades().find(p => p.status === 'OPEN').side, 'DOWN');
+    assert.equal(r.trades().filter(p => p.status === 'CLOSED_FLIP').length, 1);
+    assert.equal(r.orders().filter(o => o.action === 'SELL_TAKER').length, 1);
+    assert.equal(r.bot.snapshot().flipPolicy.flipsUsed, 1);
   });
 
   test(label + ': old resting ledger resets once and new taker ledger restores subsequently', async () => {
@@ -182,7 +183,7 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     assert.equal(archived, 1);
   });
 
-  test(label + ': repeated qualified reversals sell by visible bids and rebuy 100 shares', () => {
+  test(label + ': only the first qualified reversal sells and buys; a second is blocked', () => {
     const f = fixture();
     f.check();
     f.score(.29); // DOWN 71%
@@ -194,10 +195,10 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     f.book('UP', [{ price: .49, size: 1000 }], [{ price: .3, size: 1000 }]);
     f.book('DOWN', [{ price: .4, size: 1000 }], [{ price: .35, size: 1000 }]);
     f.check();
-    assert.equal(f.trades().filter(p => p.status === 'OPEN')[0].side, 'UP');
-    assert.equal(f.trades().filter(p => p.status === 'CLOSED_FLIP').length, 2);
-    assert.equal(f.orders().filter(order => order.action === 'SELL_TAKER').length, 2);
-    assert.equal(f.orders().filter(order => order.action === 'BUY_TAKER').length, 3);
+    assert.equal(f.trades().filter(p => p.status === 'OPEN')[0].side, 'DOWN');
+    assert.equal(f.trades().filter(p => p.status === 'CLOSED_FLIP').length, 1);
+    assert.equal(f.orders().filter(order => order.action === 'SELL_TAKER').length, 1);
+    assert.equal(f.orders().filter(order => order.action === 'BUY_TAKER').length, 2);
     assert.ok(f.trades().filter(p => p.status === 'CLOSED_FLIP').every(p => p.exitReason === 'OPPOSITE_SIGNAL'));
   });
 
@@ -223,6 +224,71 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     f.check();
     assert.equal(f.trades().filter(p => p.status === 'OPEN')[0].side, 'DOWN');
     assert.equal(f.orders().filter(order => order.action === 'SELL_TAKER').length, 2);
+    assert.equal(f.bot.snapshot().flipPolicy.flipsUsed, 1);
+    assert.equal(f.bot.snapshot().flipPolicy.completed, true);
+  });
+
+  test(label + ': flip allowed at 3:59.999 but blocked at exactly 4:00 and later', () => {
+    for (const elapsed of [239999, 240000, 240001, 299999]) {
+      const f = fixture(); f.check(); f.time(f.start + elapsed); f.score(.29);
+      f.book('UP'); f.book('DOWN'); f.check();
+      assert.equal(f.orders().filter(o => o.action === 'SELL_TAKER').length,
+        elapsed < 240000 ? 1 : 0, String(elapsed));
+      assert.equal(f.trades().find(p => p.status === 'OPEN').side, elapsed < 240000 ? 'DOWN' : 'UP');
+    }
+  });
+
+  test(label + ': initial entry is still allowed after 4:00; cutoff only blocks flips', () => {
+    const f = fixture(); f.time(f.start + 250000); f.score(.75); f.book(); f.check();
+    assert.equal(f.orders().length, 1); assert.equal(f.orders()[0].action, 'BUY_TAKER');
+    assert.equal(f.bot.snapshot().flipPolicy.flipsUsed, 0);
+  });
+
+  test(label + ': no liquidity does not consume the flip allowance', () => {
+    const f = fixture(); f.check(); f.score(.29);
+    f.book('UP', [{ price: .4, size: 1000 }], []); f.book('DOWN'); f.check();
+    assert.equal(f.orders().length, 1); assert.equal(f.bot.snapshot().flipPolicy.flipsUsed, 0);
+    f.book(); f.check(); assert.equal(f.bot.snapshot().flipPolicy.flipsUsed, 1);
+  });
+
+  test(label + ': partial-sale continuation stops at cutoff and survives restart', () => {
+    const f = fixture(); f.check(); f.time(f.start + 239000); f.score(.29);
+    f.book('UP', [{ price: .4, size: 1000 }], [{ price: .3, size: 40 }]); f.book('DOWN'); f.check();
+    assert.equal(f.bot.snapshot().flipPolicy.flipsUsed, 1);
+    const saved = JSON.parse(JSON.stringify(f.bot.exportLedger())), r = fixture();
+    r.bot.restoreLedger(saved); r.time(r.start + 240000); r.score(.29); r.book(); r.book('DOWN'); r.check();
+    assert.equal(r.orders().filter(o => o.action === 'SELL_TAKER').length, 1);
+    assert.equal(r.orders().filter(o => o.action === 'BUY_TAKER').length, 1);
+    assert.equal(r.trades().find(p => p.status === 'OPEN').shares, 60);
+    assert.equal(r.bot.snapshot().flipPolicy.flipsUsed, 1);
+  });
+
+  test(label + ': pending rebuy cannot change sides or execute past cutoff', () => {
+    const f = fixture(42); f.check(); f.score(.29);
+    f.book('UP', [{ price: .4, size: 1000 }], [{ price: .01, size: 1000 }]);
+    f.book('DOWN'); f.check();
+    assert.equal(f.trades().filter(p => p.status === 'OPEN').length, 0);
+    assert.equal(f.bot.snapshot().flipPolicy.flipsUsed, 1);
+    f.score(.75); f.book('UP', [{ price: .01, size: 1000 }]); f.check();
+    assert.equal(f.orders().filter(o => o.action === 'BUY_TAKER').length, 1);
+    f.time(f.start + 240000); f.score(.29); f.book('DOWN', [{ price: .01, size: 1000 }]); f.check();
+    assert.equal(f.orders().filter(o => o.action === 'BUY_TAKER').length, 1);
+  });
+
+  test(label + ': new window resets the allowance without discarding earlier history', () => {
+    const f = fixture(); f.check(); f.score(.29); f.check();
+    assert.equal(f.bot.snapshot().flipPolicy.flipsUsed, 1);
+    f.time(f.start + 300000); f.bot.expireMarket(f.record, f.now());
+    const next = f.start + 300000;
+    f.record.market = { ...f.record.market, id: 'market-next', start: next, end: next + 300000 };
+    f.record.marketStatus = 'OPEN'; f.time(next + 60000);
+    f.score(.75, { windowStart: next, candleStart: next });
+    f.book(); f.book('DOWN');
+    for (const q of Object.values(f.record.quotes)) q.marketId = 'market-next';
+    f.check(); assert.equal(f.bot.snapshot().flipPolicy.flipsUsed, 0);
+    f.score(.29, { windowStart: next, candleStart: next }); f.check();
+    assert.equal(f.bot.snapshot().flipPolicy.flipsUsed, 1);
+    assert.equal(f.orders().filter(o => o.action === 'SELL_TAKER').length, 2);
   });
 
   test(label + ': stale opposite asks cannot trigger a sale before a new buy', () => {
@@ -271,7 +337,8 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     const output = elements.get('auditTrail') || elements.get('restingOrders');
     assert.match(output.innerHTML, /100 \/ 100 filled/);
     assert.match(output.innerHTML, /fees \$1\.20/);
-    assert.match(elements.get('modelDecision').textContent, /repeated reversals are allowed/);
+    assert.match(elements.get('modelDecision').textContent, /one flip is allowed, strictly before 4:00/);
+    assert.match(elements.get('recovery').textContent, /flips used 0\/1/);
     assert.match(elements.get('scoreAdjustment').textContent, /Closed 1m baseline UP 66\.0%/);
     assert.match(elements.get('scoreAdjustment').textContent, /adjusted UP 70\.0%/);
     assert.match(html, /strictly above 65%/);

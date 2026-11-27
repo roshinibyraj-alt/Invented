@@ -123,7 +123,7 @@ test('same strategy restores existing cash, fills, outcomes and old equity histo
   f.bot.freqaiWorker = { snapshot: () => ({ status: 'READY', lastPrediction: {
     windowStart: START, candleCloseAt: f.now(), writtenAt: f.now(), pUp: .7, pDown: .3,
   } }) };
-  f.record.quotes.UP = { bestBid: .59, bestAsk: .6, asks: [{ price: .6, size: 100 }],
+  f.record.quotes.UP = { bestBid: .39, bestAsk: .4, asks: [{ price: .4, size: 100 }],
     updatedAt: f.now(), tokenId: 'up', marketId: 'market', windowStart: START };
   f.bot.processSide(f.record);
   assert.equal(f.bot.positions.length, 1);
@@ -133,7 +133,7 @@ test('same strategy restores existing cash, fills, outcomes and old equity histo
   assert.equal(restored.cash, f.bot.cash);
   assert.deepEqual(restored.positions.map(p => p.fills), f.bot.positions.map(p => p.fills));
   assert.deepEqual(restored.equityCurve, f.bot.equityCurve);
-  assert.equal(restored.snapshot().strategy.id, 'invented-freqai58-taker-flat100-v1');
+  assert.equal(restored.snapshot().strategy.id, Bot.STRATEGY.id);
 });
 
 async function renderState(state) {
