@@ -8,6 +8,15 @@ const vm = require('node:vm');
 const { CalibratedBot } = require('../calibrated-bot');
 const startServer = require('../server');
 
+test('live card refreshes do not replay a fade-in animation', () => {
+  const html=fs.readFileSync(path.join(__dirname,'../public/freqai-dashboard.html'),'utf8');
+  const cardRule=html.match(/\.tf\{([^}]+)\}/);
+  assert.ok(cardRule);
+  assert.doesNotMatch(cardRule[1],/animation|opacity|transform/);
+  assert.doesNotMatch(html,/@keyframes rise|animation:rise/);
+  assert.match(html,/setInterval\(poll,2000\)/);
+});
+
 test('new public dashboard and API expose separate paper accounts without legacy strategy', async () => {
   const bot = new CalibratedBot({ worker: { snapshot: () => ({status:'TRAINING',models:{}}) } });
   const server = startServer(bot,0);
