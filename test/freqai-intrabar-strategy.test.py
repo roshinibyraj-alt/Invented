@@ -228,6 +228,13 @@ class IntrabarPredictionExportTest(unittest.TestCase):
                 self.assertEqual(strategy._intrabar_candle_start, start)
                 self.assertEqual(strategy._intrabar_observed_at, now)
 
+                late_timestamp = FakeDataFrame({
+                    **old, "date": RealDateTime.fromtimestamp((start + 3828) / 1000, timezone.utc),
+                })
+                aligned = strategy._inject_intrabar_candle(late_timestamp)
+                self.assertEqual(len(aligned.rows), 1)
+                self.assertEqual(aligned.iloc[-1]["date"].timestamp() * 1000, start)
+
                 candle["observedAt"] = now - 20_000
                 Path(candle_path).write_text(json.dumps(candle))
                 stale = strategy._inject_intrabar_candle(FakeDataFrame(old))

@@ -138,12 +138,15 @@ class FreqAIWindowStrategy(IStrategy):
                 return dataframe
             last = dataframe.iloc[-1]
             last_start = int(pd.to_datetime(last["date"], utc=True).timestamp() * 1000)
-            if last_start > start or (last_start < start and start - last_start != 60_000):
+            current_row_is_live_minute = start <= last_start < start + 60_000
+            previous_row_is_immediately_before_live = last_start < start and start - last_start == 60_000
+            if not current_row_is_live_minute and not previous_row_is_immediately_before_live:
                 return dataframe
             values = {"open": open_price, "high": high, "low": low,
                       "close": close, "volume": volume}
-            if last_start == start:
+            if current_row_is_live_minute:
                 row_index = dataframe.index[-1]
+                dataframe.loc[row_index, "date"] = pd.to_datetime(start, unit="ms", utc=True)
                 for name, value in values.items():
                     dataframe.loc[row_index, name] = value
             else:
