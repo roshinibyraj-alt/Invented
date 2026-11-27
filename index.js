@@ -54,7 +54,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- >58% FreqAI after 45 seconds; immediate 100-share taker buys with fees; no flips or live orders.');
+  console.log('MODE: DEMO -- >70% FreqAI after 45 seconds, best ask < $0.50; repeat 100-share taker reversals with fees; no live orders.');
 
   let stopping = false;
   const shutdown = async () => {

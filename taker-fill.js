@@ -30,4 +30,45 @@ function planTakerBuy(record, side, now, cash) {
     markBid: q.bestBid == null ? null : Number(q.bestBid), markUpdatedAt: q.updatedAt,
     signalAsk: q.bestAsk, feeRate };
 }
-module.exports = { planTakerBuy };
+
+function planTakerSell(record, side, requestedShares, now) {
+  const m = record.market, q = record.quotes?.[side];
+  if (!m || record.marketStatus !== 'OPEN' || now < Number(m.start) + 45_000
+    || now >= Number(m.end) || !Number.isFinite(requestedShares) || requestedShares <= 0
+    || !q || q.updatedAt == null || !Number.isFinite(Number(q.updatedAt))
+    || now < Number(q.updatedAt) || now - Number(q.updatedAt) > 2000
+    || !Array.isArray(q.bids)
+    || (q.tokenId && q.tokenId !== String(m.tokens[side]))
+    || (q.marketId && q.marketId !== String(m.id || m.slug))
+    || (q.windowStart != null && Number(q.windowStart) !== Number(m.start))) return null;
+  const feeRate = m.feesEnabled === false ? 0 : Number(m.feeSchedule?.rate ?? 0.05);
+  if (!Number.isFinite(feeRate) || feeRate < 0 || feeRate >= 1) return null;
+  let remaining = requestedShares, grossProceeds = 0, fees = 0;
+  const fills = [];
+  for (const level of [...q.bids].sort((a, b) => Number(b.price) - Number(a.price))) {
+    const price = Number(level.price), size = Number(level.size);
+    if (!(price > 0 && price < 1) || !Number.isFinite(size) || size <= 0) continue;
+    const shares = Math.min(remaining, size);
+    const fee = Number((shares * feeRate * price * (1 - price)).toFixed(5));
+    fills.push({ price, shares, fee, liquidity: 'TAKER', at: now });
+    grossProceeds += shares * price;
+    fees += fee;
+    remaining -= shares;
+    if (remaining <= 1e-8) break;
+  }
+  const filledShares = requestedShares - remaining;
+  if (filledShares <= 0) return null;
+  return {
+    shares: filledShares,
+    grossProceeds,
+    netProceeds: grossProceeds - fees,
+    fees,
+    fills,
+    exitPrice: grossProceeds / filledShares,
+    unfilledShares: remaining,
+    status: remaining > 1e-8 ? 'PARTIALLY_FILLED' : 'FILLED',
+    feeRate,
+  };
+}
+
+module.exports = { planTakerBuy, planTakerSell };
