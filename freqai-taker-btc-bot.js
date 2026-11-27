@@ -5,9 +5,10 @@ const { planTakerBuy } = require('./taker-fill');
 const { currentPrediction } = PreviousBot._test;
 const STRATEGY = Object.freeze({
   ...PreviousBot.STRATEGY,
-  id: 'invented-freqai58-taker-flat100-v1',
+  id: 'invented-freqai58-taker-flat100-intrabar5s-v1',
   name: 'Invented BTC FreqAI 58% immediate taker',
-  version: 'taker-flat100-v1',
+  version: 'taker-flat100-intrabar5s-v1',
+  scoring: 'The existing LightGBM model is re-evaluated about every five seconds on the in-progress Binance 1-minute candle. These provisional probabilities were trained from completed candles and are experimental, not calibrated.',
   execution: 'Paper-only immediate taker buys; no live orders.',
   entry: 'After 45 seconds, a fresh current-window score strictly above 58% immediately buys up to 100 shares at available asks.',
   fill: 'Immediate visible-ask sweep with volume-weighted entry price and market-specific taker fees. Any unfilled remainder is cancelled.',

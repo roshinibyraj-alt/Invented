@@ -191,7 +191,7 @@
     $('recovery').textContent='Flat 100 shares · no recovery sizing or signal selling · hold fills to resolution';
     $('modelStatus').textContent=String(f.status||'WAITING').replace(/_/g,' ');
     $('modelStatus').className='badge '+(f.status==='READY'?'':'warn');
-    $('modelNote').textContent=f.lastError?`Model worker: ${f.lastError}`:(p?`Current-window score from ${esc(p.model||'FreqAI')} · candle ${time(p.candleStart)}`:'FreqAI is training or waiting for its next 1-minute candle.');
+    $('modelNote').textContent=f.lastError?`Model worker: ${f.lastError}`:(p?.provisional?`EXPERIMENTAL intrabar score · refreshed ${time(p.observedAt)} · in-progress 1-minute candle; may fluctuate and is not calibrated.`:p?`Closed 1-minute candle score from ${esc(p.model||'FreqAI')} · candle ${time(p.candleStart)}`:'FreqAI is training or waiting for its next 1-minute candle.');
     const display=p;
     if(display&&num(display.pUp)&&num(display.pDown)){
       $('pUp').textContent=(Number(display.pUp)*100).toFixed(1)+'%';$('pDown').textContent=(Number(display.pDown)*100).toFixed(1)+'%';$('probBar').style.width=(Number(display.pUp)*100).toFixed(1)+'%';

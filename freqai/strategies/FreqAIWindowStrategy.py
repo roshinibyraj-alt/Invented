@@ -16,14 +16,14 @@ class FreqAIWindowStrategy(IStrategy):
     """Prediction-only FreqAI strategy; it never opens Freqtrade orders."""
 
     timeframe = "1m"
-    process_only_new_candles = True
+    # Freqtrade's loop is throttled to five seconds. Re-run FreqAI on the
+    # current, still-forming one-minute candle on each loop.
+    process_only_new_candles = False
     startup_candle_count = 60
     can_short = False
     minimal_roi = {"0": 1000}
     stoploss = -0.99
     use_exit_signal = False
-
-    _last_exported_candle: int | None = None
 
     def feature_engineering_expand_basic(
         self, dataframe: DataFrame, metadata: dict, **kwargs
@@ -96,10 +96,6 @@ class FreqAIWindowStrategy(IStrategy):
             candle_start = int(pd.to_datetime(row["date"], utc=True).timestamp() * 1000)
         except (KeyError, TypeError, ValueError, OverflowError):
             return
-        if candle_start == self._last_exported_candle:
-            return
-        self._last_exported_candle = candle_start
-
         try:
             do_predict = int(row.get("do_predict", 0)) == 1
         except (TypeError, ValueError, OverflowError):
@@ -125,7 +121,9 @@ class FreqAIWindowStrategy(IStrategy):
         prediction_path = os.environ.get("FREQAI_PREDICTION_FILE")
         if not prediction_path:
             return
+        observed_at = int(datetime.now(timezone.utc).timestamp() * 1000)
         candle_close_at = candle_start + 60_000
+        provisional = candle_start <= observed_at < candle_close_at
         payload = {
             "source": "FREQAI",
             "model": "LightGBMClassifier",
@@ -135,7 +133,9 @@ class FreqAIWindowStrategy(IStrategy):
             "candleStart": candle_start,
             "candleCloseAt": candle_close_at,
             "windowStart": candle_start // 300_000 * 300_000,
-            "writtenAt": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "writtenAt": observed_at,
+            "observedAt": observed_at,
+            "provisional": provisional,
         }
         path = Path(prediction_path)
         path.parent.mkdir(parents=True, exist_ok=True)

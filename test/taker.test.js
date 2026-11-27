@@ -64,6 +64,35 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     f.score(.58001); f.check(); assert.equal(f.trades().length, 1);
   });
 
+  test(label + ': accepts fresh five-second provisional scores only for the live one-minute candle', () => {
+    const f = fixture();
+    f.time(f.start + 45000);
+    f.score(.61, { provisional: true, observedAt: f.now(), writtenAt: f.now(),
+      candleStart: f.start, candleCloseAt: f.start + 60000, windowStart: f.start });
+    f.book();
+    f.check();
+    assert.equal(f.trades().length, 1);
+    assert.equal(f.trades()[0].selectedProbability, .61);
+
+    const stale = fixture();
+    stale.time(stale.start + 45000);
+    stale.score(.9, { provisional: true, observedAt: stale.now() - 13000,
+      writtenAt: stale.now() - 13000, candleStart: stale.start,
+      candleCloseAt: stale.start + 60000, windowStart: stale.start });
+    stale.book();
+    stale.check();
+    assert.equal(stale.trades().length, 0);
+
+    const oldMinute = fixture();
+    oldMinute.time(oldMinute.start + 75000);
+    oldMinute.score(.9, { provisional: true, observedAt: oldMinute.now(),
+      candleStart: oldMinute.start, candleCloseAt: oldMinute.start + 60000,
+      windowStart: oldMinute.start });
+    oldMinute.book();
+    oldMinute.check();
+    assert.equal(oldMinute.trades().length, 0);
+  });
+
   test(label + ': partial fills cancel immediately, consume window, and never flip or use TP/SL', () => {
     const f = fixture(); f.book('UP', [{ price: .4, size: 40 }]); f.check();
     const o = f.orders()[0]; assert.equal(o.status, 'PARTIALLY_FILLED');

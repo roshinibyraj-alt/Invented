@@ -25,9 +25,19 @@ function currentPrediction(raw, market, now) {
   if (!raw || !market || Number(raw.windowStart) !== Number(market.start)) return null;
   const close = Number(raw.candleCloseAt), written = Number(raw.writtenAt);
   if (!Number.isFinite(close) || !Number.isFinite(written)
-    || close < Number(market.start) - 1000 || close > now + 1000
-    || now - close > 70000 || written < close - 10000 || written > now + 5000
+    || close <= Number(market.start) || close > Number(market.end) + 60_000
     || now >= Number(market.end)) return null;
+  if (raw.provisional === true) {
+    const observed = Number(raw.observedAt ?? written);
+    const liveMinuteStart = Math.floor(now / 60_000) * 60_000;
+    if (!Number.isFinite(observed)
+      || Number(raw.candleStart) < Number(market.start) - 1000
+      || Math.abs(Number(raw.candleStart) - liveMinuteStart) > 1000
+      || close <= now || close - Number(raw.candleStart) > 60_000
+      || observed < now - 12_000 || observed > now + 5000
+      || written < observed - 2000 || written > now + 5000) return null;
+  } else if (close < Number(market.start) - 1000 || close > now + 1000
+    || now - close > 70_000 || written < close - 10_000 || written > now + 5000) return null;
   const up = Number(raw.pUp), down = Number(raw.pDown);
   if (!Number.isFinite(up) || !Number.isFinite(down) || up < 0 || down < 0 || up + down <= 0) return null;
   const pUp = up / (up + down), pDown = down / (up + down);

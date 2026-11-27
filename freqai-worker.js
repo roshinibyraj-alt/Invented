@@ -157,12 +157,15 @@ class FreqAIWorker {
       candleCloseAt,
       windowStart,
       writtenAt: Number(raw.writtenAt) || this.now(),
+      observedAt: Number(raw.observedAt) || Number(raw.writtenAt) || this.now(),
+      provisional: raw.provisional === true,
       model: String(raw.model || 'LightGBMClassifier'),
     };
     const ageMs = this.now() - this.lastPrediction.candleStart;
-    const predictionAgeMs = this.now() - this.lastPrediction.writtenAt;
+    const predictionAgeMs = this.now() - this.lastPrediction.observedAt;
+    const maxPredictionAgeMs = this.lastPrediction.provisional ? 12_000 : 120_000;
     this.status = ageMs <= 120_000 && ageMs >= -5000
-      && predictionAgeMs <= 120_000 && predictionAgeMs >= -5000
+      && predictionAgeMs <= maxPredictionAgeMs && predictionAgeMs >= -5000
       ? 'READY'
       : 'STALE';
   }
@@ -175,6 +178,7 @@ class FreqAIWorker {
       startedAt: this.startedAt,
       restartCount: this.restartCount,
       lastPrediction: this.lastPrediction ? { ...this.lastPrediction } : null,
+      scoreCadence: 'FreqAI is polled every second; the strategy emits interim-candle scores on the five-second Freqtrade loop.',
       execution: 'Prediction process only; all Polymarket execution stays in the paper bot.',
     };
   }
