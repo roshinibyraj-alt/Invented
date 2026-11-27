@@ -87,7 +87,8 @@ class FreqAIWindowStrategy(IStrategy):
     def populate_indicators(
         self, dataframe: DataFrame, metadata: dict
     ) -> DataFrame:
-        dataframe = self._inject_intrabar_candle(dataframe)
+        self._intrabar_candle_start = None
+        self._intrabar_observed_at = None
         dataframe = self.freqai.start(dataframe, metadata, self)
         self._export_latest_prediction(dataframe)
         return dataframe

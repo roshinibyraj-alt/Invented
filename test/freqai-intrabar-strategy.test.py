@@ -152,6 +152,8 @@ class IntrabarPredictionExportTest(unittest.TestCase):
         self.assertIn('dataframe["&-window-direction"] = labels', source)
         self.assertNotIn("_last_exported_candle", source)
         self.assertIn("scored = self.freqai.start(dataframe, {\"pair\": pair}, self)", source)
+        populate = source.split("def populate_indicators", 1)[1].split("def bot_loop_start", 1)[0]
+        self.assertNotIn("_inject_intrabar_candle(dataframe)", populate)
 
     def test_loop_hook_calls_freqai_again_for_each_fresh_live_minute(self):
         strategy_class = import_strategy()
