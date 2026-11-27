@@ -134,8 +134,12 @@ class FreqAIWorker {
     }
     const pUp = Number(raw.pUp);
     const pDown = Number(raw.pDown);
-    const candleStart = Number(raw.candleStart);
-    const candleCloseAt = Number(raw.candleCloseAt);
+    const rawCandleStart = Number(raw.candleStart);
+    const provisional = raw.provisional === true;
+    const candleStart = provisional
+      ? Math.floor(this.now() / 60_000) * 60_000
+      : rawCandleStart;
+    const candleCloseAt = provisional ? candleStart + 60_000 : Number(raw.candleCloseAt);
     const windowStart = Number(raw.windowStart);
     if (raw.doPredict !== true
       || !Number.isFinite(pUp) || !Number.isFinite(pDown)
@@ -160,7 +164,7 @@ class FreqAIWorker {
       windowStart,
       writtenAt: Number(raw.writtenAt) || this.now(),
       observedAt: Number(raw.observedAt) || Number(raw.writtenAt) || this.now(),
-      provisional: raw.provisional === true,
+      provisional,
       model: String(raw.model || 'LightGBMClassifier'),
     };
     const ageMs = this.now() - this.lastPrediction.candleStart;
