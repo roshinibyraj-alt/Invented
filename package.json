@@ -1,13 +1,12 @@
 {
-  "name": "invented-calibrated-btc-dual-paper-bot",
+  "name": "invented-btc94-flat300-paper-bot",
   "version": "2.0.0",
   "private": true,
-  "description": "Separate calibrated LightGBM BTC 5m and 15m paper-trading experiments.",
+  "description": "BTC 5m 94-cent trigger, 300 shares, 90-cent stop, settlement target.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/calibrated.test.js test/calibrated-server.test.js test/wick-market-data.test.js test/paper-ledger-store.test.js",
-    "test:model": "python3 -m unittest discover -s test -p calibrated_model_test.py"
+    "test": "node --test test/threshold.test.js test/threshold-server.test.js test/wick-market-data.test.js test/paper-ledger-store.test.js"
   },
   "engines": {
     "node": ">=22"

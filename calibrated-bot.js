@@ -1,13 +1,12 @@
 'use strict';
 const data = require('./wick-market-data');
 const STRATEGY = {
-  id: 'invented-calibrated-dual-btc-v1',
-  name: 'BTC Calibrated Edge · 5m + 15m',
-  mode: 'PAPER', timeframes: ['5m', '15m'], targetShares: 50, riskFraction: .02,
-  minimumProbability: .58, minimumNetEdge: .04, latencyMs: 500,
-  predictionRefresh: 'After each completed 1-minute candle; separate calibrated LightGBM models.',
-  exit: 'One entry per timeframe/window; no flips, TP or SL; official resolution only.',
-  warning: 'Research paper experiment. Training labels use Binance BTCUSDT, not Chainlink settlement. No guaranteed edge.',
+  id: 'invented-btc5m-ask94-flat300-stop90-v1',
+  name: 'BTC 5m · 94¢ entry / 90¢ stop',
+  mode: 'PAPER', timeframes: ['5m'], targetShares: 300,
+  entryAsk: .94, stopBid: .90, takeProfit: 1, latencyMs: 500,
+  exit: 'One 300-share entry per window. Best-bid stop at $0.90; otherwise official $1/$0 settlement.',
+  warning: 'Paper simulation. Taker fills use visible depth, latency and fees; trigger prices are not guaranteed fills.',
 };
 const SIDES = ['UP', 'DOWN'];
 function levels(rows, descending = false) {
@@ -22,20 +21,19 @@ function quote(book, market, side, at) {
     throw new Error('Stale or missing exchange book timestamp');
   }
   const bids = levels(book.bids, true), asks = levels(book.asks);
+  if (bids.length && asks.length && bids[0].price > asks[0].price) throw new Error('Crossed CLOB book');
   return { bids, asks, bestBid: bids[0]?.price ?? null, bestAsk: asks[0]?.price ?? null,
     updatedAt: at, exchangeAt: timestamp, tokenId: market.tokens[side] };
 }
-function buyPlan(q, probability, cash, feeRate, exponent = 1) {
-  if (!q || !Number.isFinite(probability) || probability < STRATEGY.minimumProbability
+function buyPlan(q, cash, feeRate, exponent = 1) {
+  if (!q || q.bestAsk == null || q.bestAsk < STRATEGY.entryAsk
     || !Number.isFinite(feeRate) || feeRate < 0 || feeRate > 1
     || !Number.isFinite(exponent) || exponent < 0 || q.bestAsk == null) return null;
-  const budget = cash * STRATEGY.riskFraction;
+  const budget = cash;
   let shares = 0, cost = 0, fees = 0;
   const fills = [];
   for (const l of q.asks) {
-    if (l.price < .05 || l.price > .95) continue;
     const unitFee = feeRate * Math.pow(l.price * (1-l.price), exponent);
-    if (probability - l.price - unitFee < STRATEGY.minimumNetEdge) break;
     // Reserve per-level fee rounding as well as the displayed 2% cash budget.
     const n = Math.min(STRATEGY.targetShares-shares, l.size,
       Math.max(0, budget-cost-fees-.00001)/(l.price+unitFee));
@@ -45,9 +43,10 @@ function buyPlan(q, probability, cash, feeRate, exponent = 1) {
     shares += n; cost += n*l.price; fees += fee;
     if (shares >= STRATEGY.targetShares-.000001) break;
   }
-  if (shares < 1 || cost+fees > budget+.000001) return null;
+  // Flat means exactly 300, not a silently reduced cash/depth-based size.
+  if (shares < STRATEGY.targetShares-.000001 || cost+fees > budget+.000001) return null;
   return { shares, cost, fees, fills, entryPrice: cost/shares,
-    netEdge: probability-(cost+fees)/shares, budget };
+    budget };
 }
 
 class CalibratedBot {
@@ -142,38 +141,86 @@ class CalibratedBot {
   }
   consider(tf, now) {
     const r = this.records[tf], m = r.market, a = this.accounts[tf];
-    if (!m || now < m.start || now >= m.end-30000) {
-      r.pending = null; r.status = 'No new entries during the final 30 seconds'; return;
+    if (!m || now < m.start || now >= m.end) {
+      r.pending = null; r.status = 'Waiting for current window'; return;
     }
+    const held = a.positions.find(p => p.windowStart === m.start);
+    if (held) { r.pending = null; this.stopPosition(held, r, a, now); return; }
     if ([...a.positions, ...a.history].some(p => p.windowStart === m.start)) {
-      r.pending = null; r.status = 'Entry used; hold to official resolution'; return;
+      r.pending = null; r.status = 'Entry used for this window'; return;
     }
-    const p = this.worker.prediction(tf, m.start);
-    if (!p) { r.pending = null; r.status = 'Waiting for a fresh, validated closed-minute prediction'; return; }
-    const side = p.pUp >= p.pDown ? 'UP' : 'DOWN', probability = p['p'+(side==='UP'?'Up':'Down')];
+    const fresh = side => {
+      const q = r.quotes[side];
+      return q && now-q.updatedAt <= 3000 && q.tokenId === m.tokens[side];
+    };
+    const candidates = SIDES.filter(s => fresh(s) && r.quotes[s].bestAsk >= STRATEGY.entryAsk);
+    if (candidates.length !== 1) {
+      r.pending = null; r.status = candidates.length ? 'Ambiguous books: both asks above trigger' : 'Waiting for either best ask ≥ $0.94'; return;
+    }
+    const side = candidates[0];
     const q = r.quotes[side];
     if (!q || now-q.updatedAt > 3000 || q.tokenId !== m.tokens[side]) {
       r.pending = null; r.status = 'Waiting for a fresh matching executable book'; return;
     }
     const feeRate = m.feesEnabled === false ? 0 : Number(m.feeSchedule?.rate);
     const feeExponent = m.feesEnabled === false ? 1 : Number(m.feeSchedule?.exponent);
-    const plan = buyPlan(q, probability, a.cash, feeRate, feeExponent);
-    if (!plan) { r.pending = null; r.status = 'No entry: confidence, net edge, fee data or cash budget insufficient'; return; }
-    if (!r.pending || r.pending.side !== side || r.pending.observedAt !== p.observedAt) {
-      r.pending = { side, at: now, observedAt: p.observedAt, bookAt: q.updatedAt };
-      r.status = 'Qualifying signal; waiting for next book to simulate execution latency'; return;
+    const plan = buyPlan(q, a.cash, feeRate, feeExponent);
+    if (!plan) { r.pending = null; r.status = 'Waiting for cash, valid fees and executable depth for exactly 300 shares'; return; }
+    if (!r.pending || r.pending.side !== side) {
+      r.pending = { side, at: now, bookAt: q.updatedAt };
+      r.status = '94¢ trigger; waiting for a later book after execution latency'; return;
     }
     if (now-r.pending.at < STRATEGY.latencyMs || q.updatedAt <= r.pending.bookAt) return;
     const position = { id: `${tf}-${m.start}`, timeframe: tf, marketId: m.id, marketSlug: m.slug,
       title: m.title, tokenId: m.tokens[side], side, windowStart: m.start, windowEnd: m.end,
-      ...plan, feeRate, feeExponent, probability, rawProbability: p.rawUp,
-      openedAt: now, predictionAt: p.observedAt, mark: null, status: 'OPEN' };
+      ...plan, feeRate, feeExponent, initialShares: plan.shares, initialCost: plan.cost,
+      entryFees: plan.fees, exitFees: 0, proceeds: 0, sales: [],
+      openedAt: now, mark: null, status: 'OPEN' };
     a.cash -= plan.cost+plan.fees;
     position.mark = this.mark(position, q, now);
     a.positions.unshift(position);
     this.dirty = true;
-    r.pending = null; r.status = 'Filled; hold to official resolution';
-    this.log(`${tf} ${side}: ${plan.shares.toFixed(2)} shares at $${plan.entryPrice.toFixed(4)}, net edge ${(100*plan.netEdge).toFixed(1)}¢.`);
+    r.pending = null; r.status = 'Filled 300 shares; stop at 90¢ bid or hold to settlement';
+    this.log(`${tf} ${side}: 300 shares at $${plan.entryPrice.toFixed(4)} plus $${plan.fees.toFixed(4)} fees.`);
+  }
+  stopPosition(p, r, a, now) {
+    const q = r.quotes[p.side];
+    r.status = p.stopTriggeredAt ? 'Stop triggered; selling remaining shares at available bids' : 'Holding; stop at 90¢ bid / target $1 settlement';
+    if (!q || now-q.updatedAt > 3000 || q.tokenId !== p.tokenId) return;
+    if (!p.stopTriggeredAt) {
+      if (q.bestBid == null || q.bestBid > STRATEGY.stopBid) return;
+      p.stopTriggeredAt = now; p.stopBookAt = q.updatedAt;
+      p.status = 'STOP_PENDING'; this.dirty = true; return;
+    }
+    // Once triggered, keep liquidating even if the bid rebounds.
+    if (now-p.stopTriggeredAt < STRATEGY.latencyMs || q.updatedAt <= p.stopBookAt) return;
+    const fills = [];
+    p.stopDepth = p.stopDepth || {};
+    for (const l of q.bids) {
+      const key = String(l.price);
+      const d = p.stopDepth[key] || { seen: 0, available: 0 };
+      d.available = Math.min(l.size, d.available + Math.max(0,l.size-d.seen));
+      d.seen = l.size; p.stopDepth[key] = d;
+      const n = Math.min(p.shares, d.available);
+      if (n <= .000001) continue;
+      const fee = Number((n*p.feeRate*Math.pow(l.price*(1-l.price),p.feeExponent)).toFixed(5));
+      const proceeds = n*l.price-fee;
+      p.shares -= n; d.available -= n; p.exitFees += fee; p.fees += fee; p.proceeds += proceeds; a.cash += proceeds;
+      fills.push({price:l.price,shares:n,fee,at:now});
+    }
+    for (const [price,d] of Object.entries(p.stopDepth)) {
+      if (!q.bids.some(l=>String(l.price)===price)) { d.seen=0; d.available=0; }
+    }
+    p.sales.push(...fills); p.stopBookAt = q.updatedAt; p.mark = this.mark(p,q,now);
+    if (fills.length) this.dirty = true;
+    if (p.shares <= .000001) {
+      p.shares = 0; p.closedAt = now; p.exitPrice = (p.proceeds+p.exitFees)/p.initialShares;
+      p.pnl = p.proceeds-p.cost-p.entryFees; p.payout = p.proceeds;
+      p.status = 'STOPPED'; p.shares = p.initialShares; p.mark = null;
+      a.positions = a.positions.filter(x=>x.id!==p.id); a.history.unshift(p);
+      r.status = 'Stopped; entry used for this window';
+      this.log(`5m ${p.side} STOP: ${p.pnl>=0?'+':''}$${p.pnl.toFixed(2)} net.`);
+    }
   }
   async settle(now) {
     if (now-this.lastSettlement < 10000) return;
@@ -189,7 +236,11 @@ class CalibratedBot {
           if (!winner) continue;
           const payout = winner === p.side ? p.shares : 0;
           p.closedAt = this.now(); p.exitPrice = winner === p.side ? 1 : 0;
-          p.winner = winner; p.payout = payout; p.pnl = payout-p.cost-p.fees; p.status = 'RESOLVED';
+          p.winner = winner; p.payout = payout+(p.proceeds || 0);
+          p.pnl = p.payout-p.cost-(p.entryFees ?? p.fees); p.status = 'RESOLVED';
+          p.settlementPrice = p.exitPrice;
+          p.exitPrice = (p.payout+(p.exitFees || 0))/(p.initialShares || p.shares);
+          p.shares = p.initialShares || p.shares;
           a.cash += payout;
           a.positions = a.positions.filter(item => item.id !== p.id);
           a.history.unshift(p);
@@ -207,7 +258,7 @@ class CalibratedBot {
       if (mark?.value == null) complete = false;
       else value += mark.value;
       return { ...p, status: now >= p.windowEnd ? 'AWAITING_RESOLUTION' : p.status,
-        mark, unrealizedPnl: mark?.value == null ? null : mark.value-p.cost-p.fees };
+        mark, unrealizedPnl: mark?.value == null ? null : mark.value+(p.proceeds || 0)-p.cost-(p.entryFees ?? p.fees) };
     });
     const realizedPnl = a.history.reduce((s,p) => s+p.pnl, 0);
     return { initialCapital: a.initialCapital, cash: a.cash,
@@ -249,7 +300,7 @@ class CalibratedBot {
     const now = this.now();
     const accounts = Object.fromEntries(STRATEGY.timeframes.map(tf => [tf, this.account(tf, now)]));
     return { now, mode: 'PAPER', strategy: STRATEGY, status: this.status, lastError: this.lastError,
-      model: this.worker.snapshot(), accounts, markets: this.records, events: this.events,
+      accounts, markets: this.records, events: this.events,
       persistence: { enabled: !!this.ledgerStore, lastSavedAt: this.lastSavedAt, error: this.persistenceError } };
   }
 }

@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>BTC Calibrated Edge · Paper</title>
-<meta name="description" content="Separate BTC 5-minute and 15-minute calibrated LightGBM paper-trading experiments, live quotes, model validation and official settlement results.">
-<meta property="og:title" content="BTC Calibrated Edge · Paper">
-<meta property="og:description" content="Live research dashboard for separate BTC 5m and 15m paper accounts. No live orders or guaranteed returns.">
+<title>BTC 5m · 94¢ Entry · Paper</title>
+<meta name="description" content="BTC 5-minute paper bot: 300 shares at a 94-cent ask, 90-cent bid stop and official settlement target.">
+<meta property="og:title" content="BTC 5m · 94¢ Entry · Paper">
+<meta property="og:description" content="Flat 300-share paper trading, realistic taker fills and fees, and official resolution.">
 <style>
 :root{
   --paper:#f2ede2; --card:#fbf8f1; --ink:#1d1a16; --mute:#6b6357; --line:#d9d0bf;
@@ -99,7 +99,7 @@ footer{font-size:14px;color:var(--mute);margin-top:18px;line-height:1.5}
 <div class="wrap">
 <header>
   <div class="mark">B</div>
-  <h1 id="title">BTC Calibrated Edge</h1>
+  <h1 id="title">BTC 5m · 94¢ entry / 90¢ stop</h1>
   <span class="tag paper">PAPER</span>
   <span class="tag" id="botStatus">—</span>
   <div class="conn"><span class="dot" id="dot"></span><span id="connText">Connecting…</span></div>
@@ -122,7 +122,7 @@ footer{font-size:14px;color:var(--mute);margin-top:18px;line-height:1.5}
 
 <script>
 'use strict';
-const TFS=['5m','15m'];
+const TFS=['5m'];
 const API=new URL('api/state',document.baseURI.replace(/[^/]*$/,'')).toString();
 let state=null,lastOk=0,fails=0,lastErr='',clockSkew=0,polling=false;
 const $=id=>document.getElementById(id);
@@ -167,7 +167,7 @@ function conn(){
 
 function render(){
   const s=state;
-  $('title').textContent=s.strategy?.name||'BTC Calibrated Edge';
+  $('title').textContent=s.strategy?.name||'BTC 5m · 94¢ entry / 90¢ stop';
   $('botStatus').textContent=s.status||'—';
   const eb=$('errBanner');
   if(s.lastError||s.status==='ERROR'){eb.classList.remove('hidden');eb.textContent='Bot '+(s.status==='ERROR'?'status ERROR':'last error')+': '+(s.lastError||'unknown');}else eb.classList.add('hidden');
@@ -204,20 +204,12 @@ function card(tf){
    <div class="clock"><div class="num" data-end="${mk?.end??''}">—</div><small>${mk?tm(mk.start)+' – '+tm(mk.end):'no window'}</small></div></div>
   <div class="bar"><i data-s="${mk?.start??''}" data-e="${mk?.end??''}" style="transform:scaleX(0)"></i></div>
   <div class="sec"><div class="lbl">Executable asks</div><div class="asks">${askBox('UP')}${askBox('DOWN')}</div></div>
-  <div class="sec"><div class="lbl">Calibrated probability ${pill(mod.status)}</div>
-   ${pr&&fin(pr.pUp)?`<div class="prob"><span class="big" style="color:var(--${pick==='UP'?'up':'down'})">${pick} ${pct(conf)}</span><span>raw UP score <b class="num">${pct(pr.rawUp)}</b></span></div>
-   <div class="meter"><span class="th" style="left:${(1-minP)*100}%"></span><span class="th" style="left:${minP*100}%"></span><span class="nd" style="left:${Math.min(100,Math.max(0,pr.pUp*100))}%"></span></div>
-   <div class="kv k3" style="margin-top:10px"><div><b>${pct(pr.pUp)}</b><span>P(UP)</span></div><div><b>${pct(pr.pDown)}</b><span>P(DOWN)</span></div>
-   <div><b data-age="${pr.observedAt}">${age(pr.observedAt)}</b><span>minute closed ${tm(pr.observedAt)}</span></div>
-   <div><b>${fin(pr.spotPrice)?usd(pr.spotPrice):'—'}</b><span>Binance last close</span></div><div><b>${fin(pr.referencePrice)?usd(pr.referencePrice):'—'}</b><span>Binance window open (proxy)</span></div>
-   <div><b>${tm(pr.validUntil)}</b><span>valid until</span></div></div>
-   ${pr.accepted===false?'<div class="status" style="margin-top:8px">Validation rejected: score shown for research only, never traded.</div>':''}`
-   :`<div class="empty">No current prediction. Scores appear after each completed 1-minute candle once the model is validated.</div>`}
-  </div>
+  <div class="sec"><div class="lbl">Flat sizing · price-only strategy</div>
+    <div class="kv k3"><div><b style="font-size:32px">300</b><span>shares per entry</span></div>
+    <div><b>94¢</b><span>ask trigger</span></div><div><b>90¢</b><span>bid stop</span></div></div></div>
   <div class="sec"><div class="lbl">Bot decision</div><div class="status ${go?'go':''}">${esc(rec.status||'—')}</div>
    ${rec.pending?`<div class="kv" style="margin-top:8px"><div><b>${esc(rec.pending.side)}</b><span>pending side</span></div><div><b>${tm(rec.pending.at)}</b><span>signal seen</span></div></div>`:''}</div>
   ${account(tf,acc)}
-  ${validation(met,mod.status)}
   ${mk?`<div class="sec"><details><summary>Market identifiers</summary><div class="kv" style="margin-top:8px;font-size:13px"><div><b style="font-size:14px">${esc(mk.id)}</b><span>market id</span></div><div><b style="font-size:14px">${esc(mk.slug)}</b><span>slug</span></div><div><b style="font-size:12px">${esc(mk.tokens?.UP)}</b><span>UP token</span></div><div><b style="font-size:12px">${esc(mk.tokens?.DOWN)}</b><span>DOWN token</span></div></div></details></div>`:''}
   </section>`;
 }
@@ -229,11 +221,11 @@ function account(tf,a){
     <div class="kv k3"><div><b>${cents(p.entryPrice)}</b><span>avg entry</span></div><div><b>${usd(p.cost)}</b><span>cost</span></div><div><b>${usd(p.fees,4)}</b><span>fees</span></div>
     <div><b>${m&&fin(m.bid)?cents(m.bid):'—'}</b><span>best bid</span></div><div><b>${m&&fin(m.value)?usd(m.value):'—'}</b><span>mark (depth, net fee)</span></div>
     <div><b class="${pc(p.unrealizedPnl)}">${sUsd(p.unrealizedPnl)}</b><span>unrealized P&amp;L</span></div>
-    <div><b>${pct(p.probability)}</b><span>prob at entry</span></div><div><b>${cents(p.netEdge)}</b><span>net edge</span></div><div><b>${tm(p.openedAt)}</b><span>opened</span></div>
+    <div><b>90¢</b><span>stop trigger (bid)</span></div><div><b>$1</b><span>official winning payout</span></div><div><b>${tm(p.openedAt)}</b><span>opened</span></div>
     ${m&&fin(m.unpricedShares)&&m.unpricedShares>1e-6?`<div><b>${n(m.unpricedShares)}</b><span>shares without bid depth</span></div>`:''}</div>
     ${!m?'<div class="sub" style="margin-top:6px;color:var(--mute);font-size:14px">No fresh mark; equity shown as unknown rather than guessed.</div>':''}</div>`}).join('');
   const h=a.history||[];
-  const rows=h.map(p=>`<tr class="${p.pnl>0?'w':p.pnl<0?'l':''}"><td style="color:var(--${p.side==='UP'?'up':'down'});font-weight:700">${esc(p.side)}</td><td>${tm(p.openedAt)}<br><span style="color:var(--mute)">${dt(p.windowStart)}</span></td><td>${n(p.shares)}</td><td>${cents(p.entryPrice)}</td><td>${fin(p.exitPrice)?'$'+p.exitPrice.toFixed(2):'—'}<br><span style="color:var(--mute)">won ${esc(p.winner)}</span></td><td>${usd(p.fees,3)}</td><td class="${pc(p.pnl)}" style="font-weight:700">${sUsd(p.pnl)}</td><td>${tm(p.closedAt)}</td></tr>`).join('');
+  const rows=h.map(p=>`<tr class="${p.pnl>0?'w':p.pnl<0?'l':''}"><td style="color:var(--${p.side==='UP'?'up':'down'});font-weight:700">${esc(p.side)}</td><td>${tm(p.openedAt)}<br><span style="color:var(--mute)">${dt(p.windowStart)}</span></td><td>${n(p.shares)}</td><td>${cents(p.entryPrice)}</td><td>${fin(p.exitPrice)?'$'+p.exitPrice.toFixed(4):'—'}<br><span style="color:var(--mute)">${esc(p.status)}${p.winner?' · '+esc(p.winner):''}</span></td><td>${usd(p.fees,3)}</td><td class="${pc(p.pnl)}" style="font-weight:700">${sUsd(p.pnl)}</td><td>${tm(p.closedAt)}</td></tr>`).join('');
   return `<div class="sec"><div class="lbl">Paper account · separate ${usd(a.initialCapital,0)}</div>
    <div class="kv k3"><div><b>${usd(a.cash)}</b><span>cash</span></div><div><b>${usd(a.settledBalance)}</b><span>settled balance</span></div>
    <div><b>${a.equity==null?'unknown':usd(a.equity)}</b><span>floating equity${a.valuationComplete===false?' (mark missing)':''}</span></div>
@@ -241,7 +233,7 @@ function account(tf,a){
    <div><b>${usd(a.fees,3)}</b><span>total fees</span></div><div><b>${a.wins??0} / ${a.losses??0}</b><span>wins / losses</span></div><div><b>${a.totalClosed??0}</b><span>closed trades</span></div><div><b>${usd(a.knownPositionValue)}</b><span>known position value</span></div></div></div>
   <div class="sec"><div class="lbl">Open position</div>${pos||'<div class="empty">Flat. At most one entry per window.</div>'}</div>
   <div class="sec"><div class="lbl">Equity · ${esc(tf)}</div>${chart(a.equityCurve||[])}</div>
-  <div class="sec"><div class="lbl">Closed trades (official resolution)</div>${h.length?`<div class="tscroll"><table class="trades"><thead><tr><th>Side</th><th>Entry / window</th><th>Sh</th><th>Entry</th><th>Exit</th><th>Fees</th><th>P&amp;L</th><th>Closed</th></tr></thead><tbody>${rows}</tbody></table></div>${a.totalClosed>h.length?`<div class="legend">Showing latest ${h.length} of ${a.totalClosed}.</div>`:''}`:'<div class="empty">No resolved trades yet.</div>'}</div>`;
+  <div class="sec"><div class="lbl">Closed trades · stops and settlement</div>${h.length?`<div class="tscroll"><table class="trades"><thead><tr><th>Side</th><th>Entry / window</th><th>Sh</th><th>Entry</th><th>Exit</th><th>Fees</th><th>P&amp;L</th><th>Closed</th></tr></thead><tbody>${rows}</tbody></table></div>${a.totalClosed>h.length?`<div class="legend">Showing latest ${h.length} of ${a.totalClosed}.</div>`:''}`:'<div class="empty">No closed trades yet.</div>'}</div>`;
 }
 
 function chart(c){
@@ -284,11 +276,11 @@ function renderEvents(){
 }
 function renderExplain(){
   const s=state.strategy||{};
-  $('explainBody').innerHTML=`<p>Two fully separate paper accounts, ${esc((s.timeframes||TFS).join(' and '))}, each starting with $1,500. Nothing is shared between them.</p><ul>
-  <li><b>Predictions:</b> ${esc(s.predictionRefresh||'')} Scores do not update every few seconds; they refresh only after each completed 1-minute candle.</li>
-  <li><b>Calibration caveat:</b> models are trained and calibrated on Binance BTCUSDT window labels, which are a proxy. They are not verified probabilities of the Chainlink price Polymarket settles on. Trade settlement uses the official Polymarket resolution.</li>
-  <li><b>Entry rule:</b> model confidence at least ${pct(s.minimumProbability??.58,0)} and net edge at least ${cents(s.minimumNetEdge??.04)} per share after modeled fees, walking visible ask depth.</li>
-  <li><b>Sizing:</b> target ${s.targetShares??50} shares, capped at ${pct(s.riskFraction??.02,0)} of account cash. A ${s.latencyMs??500} ms latency check and a fresh book are required before a simulated fill. No new entries in the final 30 seconds.</li>
+  $('explainBody').innerHTML=`<p>BTC 5-minute markets only. Fresh $1,500 paper account. No prediction model, flips, recovery or 15-minute trades.</p><ul>
+  <li><b>Entry rule:</b> whichever side's best ask reaches or exceeds 94¢. Buy exactly 300 shares once per window, only with sufficient cash and visible ask depth.</li>
+  <li><b>Realistic fills:</b> a ${s.latencyMs??500} ms minimum delay and a later fresh book are required. Actual sweep prices can exceed 94¢ and incur taker fees. Insufficient depth or cash means wait, not smaller sizing.</li>
+  <li><b>Stop:</b> held best bid at or below 90¢ triggers a market sale after latency. Partial exits and worse prices are possible; the bot continues selling the remainder. No re-entry that window.</li>
+  <li><b>Target:</b> $1 is the official winning settlement payout, not a guaranteed $1 market sell. Expired positions wait for official UP/DOWN resolution; losing shares pay $0.</li>
   <li><b>Exit:</b> ${esc(s.exit||'')}</li></ul>
   <p><b>${esc(s.warning||'Research paper experiment. No guaranteed edge.')}</b></p>
   <p style="color:var(--mute)">Strategy id ${esc(s.id||'—')} · mode ${esc(state.mode||'PAPER')} · ledger saved ${age(state.persistence?.lastSavedAt)}</p>`;

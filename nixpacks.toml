@@ -1,10 +1,4 @@
-providers = ["...", "python"]
-
-[phases.setup]
-aptPkgs = ["libgomp1"]
-
-[phases."python:setup"]
-nixpkgsArchive = "23f9169c4ccce521379e602cc82ed873a1f1b52b"
+providers = ["node"]
 
 [phases.build]
-cmds = ["python -c 'import lightgbm, sklearn, numpy'", "npm test", "npm run test:model"]
+cmds = ["npm test"]

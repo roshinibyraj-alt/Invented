@@ -31,32 +31,26 @@ async function main() {
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
-  const CalibratedWorker = require('./calibrated-worker');
   const PaperLedgerStore = require('./paper-ledger-store');
   const ledgerPath = process.env.PAPER_LEDGER_PATH || null;
   const ledgerStore = ledgerPath ? new PaperLedgerStore(ledgerPath) : null;
   if (ledgerPath && !fs.existsSync(path.dirname(ledgerStore.filePath))) {
     throw new Error(`Paper-history storage is not mounted at ${path.dirname(ledgerStore.filePath)}.`);
   }
-  const worker = new CalibratedWorker({
-    directory: path.join(ledgerPath ? path.dirname(ledgerPath) : require('node:os').tmpdir(), 'calibrated-dual-models'),
-  });
-  const bot = new Bot({ ledgerStore, worker });
+  const bot = new Bot({ ledgerStore });
   const savedLedger = ledgerStore?.load() || PaperLedgerStore.decodeBootstrap(process.env.PAPER_LEDGER_BOOTSTRAP);
   await restoreOrResetLedger(bot, savedLedger, Bot.STRATEGY.id);
   await bot.flushLedger();
-  worker.start();
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: PAPER ONLY -- separate calibrated LightGBM BTC 5m/15m; 50-share target within 2% cash; net edge >=4 cents; hold official resolution.');
+  console.log('MODE: PAPER ONLY -- BTC 5m ask >=0.94; flat 300 shares; bid stop <=0.90; otherwise official settlement. No model or 15m trading.');
 
   let stopping = false;
   const shutdown = async () => {
     if (stopping) return;
     stopping = true;
     bot.stop();
-    worker.stop();
     const forcedExit = setTimeout(() => process.exit(1), 10_000);
     forcedExit.unref?.();
     await bot.flushLedger();
