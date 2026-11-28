@@ -373,6 +373,7 @@ function renderExplain(){
   <p>This is a statistical model, not FreqAI and not a trained or calibrated classifier. Its odds are estimates that can be wrong, and paper results are no promise of profit.</p>
   <ul>
   <li><b>Model:</b> ${esc(s.model||'')}</li>
+  <li><b>Buy value, not the favourite:</b> ${esc(s.entrySelection||'Both sides compete on fee- and uncertainty-adjusted edge, even below 50% probability. Cheap alone is not sufficient.')}</li>
   <li><b>Probability is not price.</b> A sudden BTC move changes the settlement odds, and the order book reprices too. The bot asks one question: is the ask, plus taker fee, below the cautious (lower-band) odds by at least ${cents(s.minEdge)}?</li>
   <li><b>Time matters.</b> With more time left, BTC can travel further, so odds stay nearer 50%. Late in the window a small lead is worth a lot. No entries in the final ${s.entryCutoffSeconds??20}s.</li>
   <li><b>Settlement source:</b> UP/DOWN resolves against the official beat price. The model forecasts a final-60s Chainlink spot average as a proxy for the official TWAP; the two can differ.</li>

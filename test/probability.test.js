@@ -3,7 +3,7 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { probabilityModel } = require('../probability-model');
 const Feed = require('../probability-feed');
-const { ProbabilityBot, entryPlan, quote } = require('../probability-bot');
+const { ProbabilityBot, entryPlan, rankEntryCandidates, quote } = require('../probability-bot');
 const { restoreOrResetLedger } = require('../index');
 const Store = require('../paper-ledger-store');
 const START = 1800000000000;
@@ -90,7 +90,7 @@ test('entry plans include per-level fees and reject prices without conservative 
 test('paper sizing is up to 50 shares, at most 2% settled capital, with no recovery sizing', () => {
   const f = fixture(), p = f.enter();
   near(p.shares, 50); assert.ok(p.cost + p.entryFees <= 30);
-  assert.equal(f.bot.snapshot().strategy.id, 'invented-btc5m-time-aware-twap-value-v1');
+  assert.equal(f.bot.snapshot().strategy.id, 'invented-btc5m-time-aware-twap-value-v2');
   assert.equal(f.bot.snapshot().strategy.targetShares, 50);
 });
 test('entry waits for later exchange book and uses actual new asks, not signal price', () => {
@@ -108,6 +108,41 @@ test('entry cancels if the edge vanishes during latency or inputs become unavail
 test('DOWN enters independently when it offers the better probability-price gap', () => {
   const f = fixture(); f.setModel({ up: .3, down: .7, lowerUp: .23, lowerDown: .63 });
   const p = f.enter('DOWN'); assert.equal(p.side, 'DOWN'); near(p.shares, 50);
+});
+test('either below-50% side buys on value after fees and uncertainty, not the favourite', () => {
+  for (const side of ['UP', 'DOWN']) {
+    const f = fixture(), other = side === 'UP' ? 'DOWN' : 'UP';
+    f.setModel(side === 'UP' ? { up: .4, down: .6, lowerUp: .33, lowerDown: .53 }
+      : { up: .6, down: .4, lowerUp: .53, lowerDown: .33 });
+    for (let tick = 0; tick < 2; tick++) {
+      f.book(side, .25, .24); f.book(other, .76, .75); f.consider(); f.advance();
+    }
+    const p = f.a.positions[0];
+    assert.equal(p.side, side); near(p.entryProbability, .4); near(p.entryPrice, .25);
+    assert.ok(p.conservativeEdge >= .03); assert.ok(p.fees > 0);
+    assert.match(p.entryReason, /40.0%.*25.9¢.*Selected by value/);
+  }
+});
+test('cheap alone is rejected if its lower probability does not cover fees and minimum edge', () => {
+  const f = fixture(); f.setModel({ up: .15, down: .85, lowerUp: .08, lowerDown: .78 });
+  f.book('UP', .25, .24); f.book('DOWN', .86, .85); f.consider();
+  assert.equal(f.r.pending, null); assert.equal(f.a.positions.length, 0);
+});
+test('both qualifying sides compete on executable edge; price or win chance alone cannot choose', () => {
+  const books = { UP: { asks: [{ price: .3, size: 100 }] }, DOWN: { asks: [{ price: .4, size: 100 }] } };
+  const model = { status: 'READY', up: .42, down: .58, lowerUp: .35, lowerDown: .51 };
+  let choices = rankEntryCandidates(books, model, 30, { rate: .05, exponent: 1 });
+  assert.equal(choices.length, 2); assert.equal(choices[0].side, 'DOWN');
+  model.up = .58; model.down = .42; model.lowerUp = .51; model.lowerDown = .35;
+  choices = rankEntryCandidates(books, model, 30, { rate: .05, exponent: 1 });
+  assert.equal(choices.length, 1); assert.equal(choices[0].side, 'UP');
+});
+test('equal conservative edges prefer the lower all-in cost and unavailable models never rank', () => {
+  const books = { UP: { asks: [{ price: .3, size: 100 }] }, DOWN: { asks: [{ price: .2, size: 100 }] } };
+  const model = { status: 'READY', up: .55, down: .45, lowerUp: .48, lowerDown: .38 };
+  const choices = rankEntryCandidates(books, model, 30, { rate: 0, exponent: 1 });
+  assert.equal(choices.length, 2); assert.equal(choices[0].side, 'DOWN');
+  assert.deepEqual(rankEntryCandidates(books, { ...model, status: 'WAITING' }, 30, { rate: 0, exponent: 1 }), []);
 });
 test('there is no forced trade, 94-cent trigger, fixed 90-cent stop or recovery buy', () => {
   const f = fixture(); f.book('UP', .94, .93); f.consider(); assert.equal(f.a.positions.length, 0);
@@ -220,7 +255,7 @@ test('strategy replacement archives old ledger and resets once; restart preserve
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'probability-reset-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const store = new Store(path.join(dir, 'ledger.json')), f = fixture(); f.bot.ledgerStore = store;
-  const old = { strategyId: 'invented-btc5m-ask94-flat300-stop90-v1', accounts: {} };
+  const old = { strategyId: 'invented-btc5m-time-aware-twap-value-v1', accounts: {} };
   await store.save(old);
   assert.equal(await restoreOrResetLedger(f.bot, old, ProbabilityBot.STRATEGY.id), 'reset');
   near(store.load().accounts['5m'].cash, 1500); assert.ok(fs.readdirSync(dir).length >= 2);

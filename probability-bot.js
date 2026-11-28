@@ -3,12 +3,13 @@ const { CalibratedBot, quote } = require('./calibrated-bot');
 const ProbabilityFeed = require('./probability-feed');
 const SIDES = ['UP', 'DOWN'], EPS = 1e-6;
 const STRATEGY = Object.freeze({
-  id: 'invented-btc5m-time-aware-twap-value-v1',
+  id: 'invented-btc5m-time-aware-twap-value-v2',
   name: 'BTC 5m · Time & value',
   mode: 'PAPER', timeframes: ['5m'], targetShares: 50,
   entryCapitalPercent: 2, openCostPercent: 5, minEdge: .03,
   maxEntriesPerWindow: 3, cooldownSeconds: 15, entryCutoffSeconds: 20, latencyMs: 500,
   model: 'Ten-minute BTC movement ensemble: diffusion, decaying momentum and evidence-weighted mean reversion.',
+  entrySelection: 'Compare both sides by executable fee- and uncertainty-adjusted edge, not by highest win probability. A below-50% side can qualify. Equal-edge choices prefer the lower all-in price.',
   exit: 'Sell when the executable net bid exceeds modeled value, or when probability deteriorates and selling remains within the uncertainty allowance. Otherwise hold to official settlement.',
   warning: 'Uncalibrated statistical estimates, not guaranteed edge. Uses a final-60s Chainlink spot-average proxy for the official TWAP. Actual later books and taker fees determine paper fills. No recovery sizing or forced trades.',
 });
@@ -36,6 +37,21 @@ function entryPlan(q, budget, fairLower, f, targetShares = STRATEGY.targetShares
   if (shares < 5 - EPS || cost + fees > budget + EPS) return null;
   return { shares, cost, fees, fills, entryPrice: cost / shares,
     conservativeEdge: fairLower - (cost + fees) / shares };
+}
+
+function rankEntryCandidates(books, model, budget, fees) {
+  if (model.status !== 'READY') return [];
+  return SIDES.map(side => {
+    const probability = side === 'UP' ? model.up : model.down;
+    const lower = side === 'UP' ? model.lowerUp : model.lowerDown;
+    if (!Number.isFinite(probability) || probability < 0 || probability > 1
+      || !Number.isFinite(lower) || lower < 0 || lower > probability) return null;
+    const plan = entryPlan(books[side], budget, lower, fees);
+    return plan ? { side, probability, allInPrice: (plan.cost + plan.fees) / plan.shares, plan } : null;
+  }).filter(Boolean).sort((x, y) => {
+    const edgeDifference = y.plan.conservativeEdge - x.plan.conservativeEdge;
+    return Math.abs(edgeDifference) > EPS ? edgeDifference : x.allInPrice - y.allInPrice;
+  });
 }
 
 class ProbabilityBot extends CalibratedBot {
@@ -124,20 +140,20 @@ class ProbabilityBot extends CalibratedBot {
       r.pending = null; this.decide(r, 'WAIT', 'Waiting for the market taker fee schedule.'); return;
     }
     const budget = this.riskBudget(a);
-    const candidates = SIDES.filter(side => this.fresh(r.quotes[side], m, side, now)).map(side => ({
-      side, plan: entryPlan(this.entryBook(r, m, side), budget, side === 'UP' ? model.lowerUp : model.lowerDown, f),
-    })).filter(x => x.plan).sort((x, y) => y.plan.conservativeEdge - x.plan.conservativeEdge);
+    const books = Object.fromEntries(SIDES.filter(side => this.fresh(r.quotes[side], m, side, now))
+      .map(side => [side, this.entryBook(r, m, side)]));
+    const candidates = rankEntryCandidates(books, model, budget, f);
     if (!candidates.length) {
       r.pending = null; this.decide(r, 'WAIT', budget < 1 ? 'Open-cost or cash limit reached.'
         : 'No executable purchase offers 3¢ edge after fees and model uncertainty.', { budget }); return;
     }
-    const { side, plan } = candidates[0], q = r.quotes[side];
+    const { side, plan, probability, allInPrice } = candidates[0], q = r.quotes[side];
+    const valueReason = `${side} wins an estimated ${(probability * 100).toFixed(1)}% versus ${(allInPrice * 100).toFixed(1)}¢ all-in cost; ${(plan.conservativeEdge * 100).toFixed(1)}¢ edge after uncertainty. Selected by value, not highest win probability.`;
     if (!r.pending || r.pending.side !== side) {
       r.pending = { side, at: now, bookAt: q.exchangeAt, windowStart: m.start };
-      this.decide(r, 'BUY_PENDING', `${side} offers positive conservative edge; checking a later book after 500ms.`, { side, budget }); return;
+      this.decide(r, 'BUY_PENDING', `${valueReason} Checking a later book after 500ms.`, { side, budget }); return;
     }
     if (now - r.pending.at < 500 || q.exchangeAt <= r.pending.bookAt) return;
-    const probability = side === 'UP' ? model.up : model.down;
     const position = {
       id: `value-${m.start}-${now}-${++this.tradeSequence}`, timeframe: tf,
       marketId: m.id, marketSlug: m.slug, title: m.title, tokenId: m.tokens[side],
@@ -145,7 +161,7 @@ class ProbabilityBot extends CalibratedBot {
       ...plan, initialShares: plan.shares, initialCost: plan.cost, entryFees: plan.fees,
       exitFees: 0, proceeds: 0, sales: [], feeRate: f.rate, feeExponent: f.exponent,
       openedAt: now, mark: null, status: 'OPEN', entryProbability: probability,
-      entryReason: 'Conservative settlement probability exceeds actual ask cost including fees by at least 3¢.',
+      entryReason: valueReason, entryAllInPrice: allInPrice,
       entryUncertainty: model.uncertaintyMargin, lastProbability: probability,
     };
     a.cash -= plan.cost + plan.fees; a.positions.unshift(position);
@@ -254,4 +270,4 @@ class ProbabilityBot extends CalibratedBot {
   }
 }
 ProbabilityBot.STRATEGY = STRATEGY;
-module.exports = { ProbabilityBot, STRATEGY, entryPlan, quote };
+module.exports = { ProbabilityBot, STRATEGY, entryPlan, rankEntryCandidates, quote };
