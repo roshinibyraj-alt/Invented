@@ -1,12 +1,12 @@
 {
-  "name": "invented-btc94-flat300-paper-bot",
+  "name": "invented-btc-time-value-paper-bot",
   "version": "2.0.0",
   "private": true,
-  "description": "BTC 5m 94-cent trigger, 300 shares, 90-cent stop, settlement target.",
+  "description": "BTC 5m time-aware probability paper bot with mean-reversion scenarios and realistic fills.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/threshold.test.js test/threshold-server.test.js test/wick-market-data.test.js test/paper-ledger-store.test.js"
+    "test": "node --test test/probability.test.js test/probability-server.test.js test/wick-market-data.test.js test/paper-ledger-store.test.js"
   },
   "engines": {
     "node": ">=22"

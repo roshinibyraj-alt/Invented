@@ -27,7 +27,7 @@ async function main() {
     return;
   }
 
-  const { CalibratedBot: Bot } = require('./calibrated-bot');
+  const { ProbabilityBot: Bot } = require('./probability-bot');
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
@@ -44,7 +44,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: PAPER ONLY -- BTC 5m ask >=0.94; flat 300 shares; bid stop <=0.90; otherwise official settlement. No model or 15m trading.');
+  console.log('MODE: PAPER ONLY -- BTC 5m time-aware TWAP probability ensemble; 10-minute actual BTC movements, cost-aware entries and model exits. Up to 50 shares, 2% entry budget and 5% open-cost cap. No recovery or live execution.');
 
   let stopping = false;
   const shutdown = async () => {
